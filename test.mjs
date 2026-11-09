@@ -184,6 +184,7 @@ check('حافظهٔ پیش‌فرض همچنان جدا و دست‌نخورده
 await fire(msg('/project', 77));
 const projectMenu = lastBotMsg().body.reply_markup?.inline_keyboard;
 check('منوی پروژه دکمهٔ ساخت و انتخاب دارد', !!projectMenu && JSON.stringify(projectMenu).includes('project:new') && JSON.stringify(projectMenu).includes(`project:use:${alpha.id}`), projectMenu);
+check('راهنمای /project placeholderهای HTML را امن می‌فرستد', lastBotMsg().body.parse_mode === 'HTML' && lastBotMsg().body.text.includes('&lt;نام&gt;') && !lastBotMsg().body.text.includes('<نام>'), lastBotMsg().body.text);
 await fire(cb('project:new', 77));
 check('دکمهٔ ساخت پروژه درخواست نام می‌کند', lastBotMsg().body.text.includes('اسم پروژه') && JSON.stringify(lastBotMsg().body.reply_markup).includes('project:cancel'), lastBotMsg().body);
 await fire(msg('Beta', 77));

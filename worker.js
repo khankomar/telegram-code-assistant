@@ -1104,8 +1104,8 @@ return { inline_keyboard: rows };
 async function sendProjectMenu(chatId, env, notice = '') {
 const projects = await getProjects(chatId, env);
 const active = await getActiveProject(chatId, env);
-const status = active ? `پروژهٔ فعال: ✅ «${active.name}»` : 'پروژهٔ فعال: 🏠 فضای پیش‌فرض';
-const intro = notice ? `${notice}\n\n` : '';
+const status = active ? `پروژهٔ فعال: ✅ «${escapeHtml(active.name)}»` : 'پروژهٔ فعال: 🏠 فضای پیش‌فرض';
+const intro = notice ? `${escapeHtml(notice)}\n\n` : '';
 const guidance = projects.length
 ? 'برای جابه‌جایی، روی نام پروژه بزن؛ پروژه‌ها حافظه و workspace جدا دارند.'
 : 'هنوز پروژه‌ای نساخته‌ای. برای شروع روی «پروژهٔ جدید» بزن.';
