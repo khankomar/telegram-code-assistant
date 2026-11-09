@@ -14,6 +14,7 @@ const DEFAULT_AI_MODEL = 'anthropic/claude-sonnet-4';
 const MEMORY_DEFAULT_MESSAGES = 30;      // تعداد پیام‌های نگه‌داشته‌شده (کاربر + ربات)
 const MEMORY_MAX_CHARS_PER_MSG = 4000;   // سقف طول هر پیام ذخیره‌شده
 const MEMORY_TTL_HOURS = 72;             // پیام‌های قدیمی‌تر از این استفاده نمی‌شوند
+const MAX_PROJECTS_PER_CHAT = 20;
 
 // =============== پرامپت‌های سیستمی ===============
 // لحن: مثل یک دوست باهوش و برنامه‌نویس باتجربه؛ طبیعی، راحت و دقیق
@@ -623,25 +624,26 @@ cancel: '❌ لغو'
 
 function mainKeyboard(connected) {
 return {
-keyboard: connected
-? [[{ text: BTN.status }, { text: BTN.change }], [{ text: BTN.remove }, { text: BTN.help }]]
-: [[{ text: BTN.connect }], [{ text: BTN.status }, { text: BTN.help }]],
-resize_keyboard: true,
-is_persistent: true,
-input_field_placeholder: 'پیام، کد یا سوالت را بنویس...'
+inline_keyboard: connected
+? [
+[{ text: BTN.status, callback_data: 'ai:status' }],
+[{ text: BTN.change, callback_data: 'ai:change' }, { text: BTN.remove, callback_data: 'ai:remove' }],
+[{ text: BTN.help, callback_data: 'ai:help' }]
+]
+: [
+[{ text: BTN.connect, callback_data: 'ai:connect' }, { text: BTN.status, callback_data: 'ai:status' }],
+[{ text: BTN.help, callback_data: 'ai:help' }]
+]
 };
 }
 
 function cancelKeyboard() {
 return {
-keyboard: [[{ text: BTN.cancel }]],
-resize_keyboard: true,
-is_persistent: true,
-input_field_placeholder: 'مقدار خواسته‌شده را بفرست...'
+inline_keyboard: [[{ text: BTN.cancel, callback_data: 'ai:cancel' }]]
 };
 }
 
-// سازگاری با پیام‌های قدیمی که دکمه شیشه‌ای داشتند
+// منوی شیشه‌ای زیر پیام؛ دکمه‌های قدیمیِ reply keyboard هم همچنان پذیرفته می‌شوند.
 function aiMenuKeyboard(connected) { return mainKeyboard(connected); }
 
 async function sendAiMenu(chatId, userId, env) {
@@ -737,7 +739,7 @@ if (!content) throw new Error('پاسخی از مدل دریافت نشد');
 return String(content).trim().substring(0, 60);
 }
 
-// دکمه‌های شیشه‌ای پیام‌های قدیمی (callback) — برای سازگاری نگه داشته شده
+// دکمه‌های شیشه‌ای منو و callbackهای قدیمی
 async function handleCallbackQuery(cb, env) {
 try { await answerCallbackQuery(cb.id, env); } catch (e) {}
 const chatId = cb.message?.chat?.id;
@@ -745,13 +747,71 @@ const userId = cb.from?.id;
 const data = cb.data || '';
 if (!chatId || !userId) return;
 try {
+if (data.startsWith('project:')) {
+await handleProjectCallbackQuery(chatId, userId, data, env);
+return;
+}
 if (data === 'ai:connect') await startAiConnectFlow(chatId, userId, env);
+else if (data === 'ai:change') await startAiConnectFlow(chatId, userId, env);
 else if (data === 'ai:remove') await removeAiConn(chatId, userId, env);
-else if (data === 'ai:cancel') { await env.STATS.delete(aiFlowKey(userId)); await sendAiMenu(chatId, userId, env); }
+else if (data === 'ai:cancel') {
+await env.STATS.delete(aiFlowKey(userId));
+const conn = await getUserAIConn(userId, env);
+await sendMessage(chatId, '❌ لغو شد.', env, mainKeyboard(!!conn));
+}
+else if (data === 'ai:help') await handleCommand(chatId, userId, '/help', env, null);
+else if (data === 'ai:status') {
+await env.STATS.delete(aiFlowKey(userId));
+await sendAiMenu(chatId, userId, env);
+}
 else await sendAiMenu(chatId, userId, env);
 } catch (e) {
 console.error('callback error', e);
 }
+}
+
+async function handleProjectCallbackQuery(chatId, userId, data, env) {
+if (data === 'project:menu') { await sendProjectMenu(chatId, env); return; }
+if (data === 'project:github') { await sendProjectGithubMenu(chatId, userId, env); return; }
+if (data === 'project:link') { await startProjectRepoFlow(chatId, env); return; }
+if (data === 'project:unlink') {
+const project = await getActiveProject(chatId, env);
+if (project) await env.STATS.delete(projectRepoKey(chatId, project.id));
+await sendProjectGithubMenu(chatId, userId, env, 'اتصال مخزن از پروژه جدا شد؛ فایل‌های workspace حفظ شدند.');
+return;
+}
+if (data === 'project:pull') { await pullProjectRepo(chatId, userId, env); return; }
+if (data === 'project:push') { await startProjectPush(chatId, userId, env); return; }
+if (data === 'project:push_confirm') { await confirmProjectPush(chatId, userId, env); return; }
+if (data === 'project:push_cancel') {
+await env.STATS.delete(projectPushPlanKey(chatId));
+await sendProjectGithubMenu(chatId, userId, env, 'ارسال لغو شد.');
+return;
+}
+if (data === 'project:new') {
+await startProjectCreateFlow(chatId, env);
+return;
+}
+if (data === 'project:cancel') {
+await env.STATS.delete(projectFlowKey(chatId));
+await sendProjectMenu(chatId, env, 'ساخت پروژه لغو شد.');
+return;
+}
+if (data === 'project:off') {
+await env.STATS.delete(activeProjectKey(chatId));
+await sendProjectMenu(chatId, env, '✅ به فضای پیش‌فرض برگشتی؛ داده‌های پروژه‌ها حفظ شده‌اند.');
+return;
+}
+if (data.startsWith('project:use:')) {
+const id = data.slice('project:use:'.length);
+const project = (await getProjects(chatId, env)).find(p => p.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+await env.STATS.put(activeProjectKey(chatId), project.id);
+await env.STATS.delete(projectFlowKey(chatId));
+await sendProjectMenu(chatId, env, `✅ پروژهٔ «${project.name}» فعال شد.`);
+return;
+}
+await sendProjectMenu(chatId, env);
 }
 
 async function answerCallbackQuery(id, env, text) {
@@ -911,6 +971,15 @@ await env.DB.prepare(`CREATE TABLE IF NOT EXISTS processed_updates (
 update_id INTEGER PRIMARY KEY,
 created_at INTEGER NOT NULL
 )`).run();
+await env.DB.prepare(`CREATE TABLE IF NOT EXISTS project_chat_history (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+chat_id INTEGER NOT NULL,
+project_id TEXT NOT NULL,
+role TEXT NOT NULL,
+content TEXT NOT NULL,
+created_at INTEGER NOT NULL
+)`).run();
+await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_project_hist_scope ON project_chat_history (chat_id, project_id, id)').run();
 schemaReady = true;
 }
 
@@ -943,9 +1012,11 @@ async function getHistory(chatId, env, settings) {
 try {
 await ensureSchema(env);
 const since = Math.floor(Date.now() / 1000) - MEMORY_TTL_HOURS * 3600;
-const { results } = await env.DB.prepare(
-'SELECT role, content FROM chat_history WHERE chat_id = ? AND created_at > ? ORDER BY id DESC LIMIT ?'
-).bind(chatId, since, memoryLimit(settings)).all();
+const project = await getActiveProject(chatId, env);
+const query = project
+? env.DB.prepare('SELECT role, content FROM project_chat_history WHERE chat_id = ? AND project_id = ? AND created_at > ? ORDER BY id DESC LIMIT ?').bind(chatId, project.id, since, memoryLimit(settings))
+: env.DB.prepare('SELECT role, content FROM chat_history WHERE chat_id = ? AND created_at > ? ORDER BY id DESC LIMIT ?').bind(chatId, since, memoryLimit(settings));
+const { results } = await query.all();
 
 const rows = (results || []).reverse();
 const out = [];
@@ -967,13 +1038,19 @@ async function addHistory(chatId, messages, env, settings) {
 try {
 await ensureSchema(env);
 const now = Math.floor(Date.now() / 1000);
-const stmts = messages.map(m => env.DB.prepare(
-'INSERT INTO chat_history (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)'
-).bind(chatId, m.role, String(m.content).substring(0, MEMORY_MAX_CHARS_PER_MSG), now));
+const project = await getActiveProject(chatId, env);
+const stmts = messages.map(m => project
+? env.DB.prepare('INSERT INTO project_chat_history (chat_id, project_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)').bind(chatId, project.id, m.role, String(m.content).substring(0, MEMORY_MAX_CHARS_PER_MSG), now)
+: env.DB.prepare('INSERT INTO chat_history (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)').bind(chatId, m.role, String(m.content).substring(0, MEMORY_MAX_CHARS_PER_MSG), now));
 await env.DB.batch(stmts);
 
 const keep = memoryLimit(settings);
+if (project) {
 await env.DB.prepare(
+`DELETE FROM project_chat_history WHERE chat_id = ? AND project_id = ? AND id NOT IN (
+SELECT id FROM project_chat_history WHERE chat_id = ? AND project_id = ? ORDER BY id DESC LIMIT ?)`
+).bind(chatId, project.id, chatId, project.id, keep).run();
+} else await env.DB.prepare(
 `DELETE FROM chat_history WHERE chat_id = ? AND id NOT IN (
 SELECT id FROM chat_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?)`
 ).bind(chatId, chatId, keep).run();
@@ -984,7 +1061,352 @@ console.error('history write error', e);
 
 async function clearHistory(chatId, env) {
 await ensureSchema(env);
-await env.DB.prepare('DELETE FROM chat_history WHERE chat_id = ?').bind(chatId).run();
+const project = await getActiveProject(chatId, env);
+if (project) await env.DB.prepare('DELETE FROM project_chat_history WHERE chat_id = ? AND project_id = ?').bind(chatId, project.id).run();
+else await env.DB.prepare('DELETE FROM chat_history WHERE chat_id = ?').bind(chatId).run();
+}
+
+function projectsKey(chatId) { return `projects:${chatId}`; }
+function activeProjectKey(chatId) { return `active_project:${chatId}`; }
+function normalizeProjectName(name) { return String(name || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase(); }
+
+async function getProjects(chatId, env) {
+try {
+const projects = JSON.parse(await env.STATS.get(projectsKey(chatId)) || '[]');
+return Array.isArray(projects) ? projects : [];
+} catch (e) { return []; }
+}
+
+async function getActiveProject(chatId, env) {
+const id = await env.STATS.get(activeProjectKey(chatId));
+if (!id) return null;
+const project = (await getProjects(chatId, env)).find(p => p.id === id);
+if (!project) { await env.STATS.delete(activeProjectKey(chatId)); return null; }
+return project;
+}
+
+function projectFlowKey(chatId) { return `project_flow:${chatId}`; }
+
+function projectMenuKeyboard(projects, active) {
+const rows = [];
+for (let i = 0; i < projects.length; i += 2) {
+rows.push(projects.slice(i, i + 2).map(project => ({
+text: `${project.id === active?.id ? '✅ ' : '📁 '}${project.name}`,
+callback_data: `project:use:${project.id}`
+})));
+}
+rows.push([{ text: '➕ پروژهٔ جدید', callback_data: 'project:new' }]);
+if (active) rows.push([{ text: '🏠 فضای پیش‌فرض', callback_data: 'project:off' }]);
+if (active) rows.push([{ text: '🐙 مخزن و همگام‌سازی GitHub', callback_data: 'project:github' }]);
+return { inline_keyboard: rows };
+}
+
+async function sendProjectMenu(chatId, env, notice = '') {
+const projects = await getProjects(chatId, env);
+const active = await getActiveProject(chatId, env);
+const status = active ? `پروژهٔ فعال: ✅ «${active.name}»` : 'پروژهٔ فعال: 🏠 فضای پیش‌فرض';
+const intro = notice ? `${notice}\n\n` : '';
+const guidance = projects.length
+? 'برای جابه‌جایی، روی نام پروژه بزن؛ پروژه‌ها حافظه و workspace جدا دارند.'
+: 'هنوز پروژه‌ای نساخته‌ای. برای شروع روی «پروژهٔ جدید» بزن.';
+await sendMessage(chatId, `${intro}📂 <b>مدیریت پروژه‌ها</b>\n${status}\n\n${guidance}`, env, projectMenuKeyboard(projects, active), 'HTML');
+}
+
+function projectRepoKey(chatId, projectId) { return `project_repo:${chatId}:${projectId}`; }
+function projectPushPlanKey(chatId) { return `project_push_plan:${chatId}`; }
+
+async function getProjectRepo(chatId, projectId, env) {
+try { return JSON.parse(await env.STATS.get(projectRepoKey(chatId, projectId)) || 'null'); }
+catch (e) { return null; }
+}
+
+async function startProjectRepoFlow(chatId, env) {
+if (!(await getActiveProject(chatId, env))) { await sendProjectMenu(chatId, env, 'برای اتصال مخزن ابتدا یک پروژه را فعال کن.'); return; }
+await env.STATS.put(projectFlowKey(chatId), 'repo', { expirationTtl: 600 });
+await sendMessage(chatId, '🐙 آدرس مخزن GitHub را بفرست (owner/repo یا لینک مخزن). برای تعیین برنچ، بعد از آدرس یک فاصله و نام برنچ را بنویس.', env, {
+inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]]
+});
+}
+
+async function linkProjectRepo(chatId, userId, input, env) {
+const project = await getActiveProject(chatId, env);
+if (!project) return { ok: false, message: 'اول یک پروژه بساز یا از منوی /project انتخابش کن.' };
+const token = await getGithubToken(userId, env);
+if (!token) return { ok: false, message: 'اول گیت‌هاب را وصل کن: /github <توکن>' };
+const [rawRepo, ...branchParts] = String(input || '').trim().split(/\s+/);
+const repo = String(rawRepo || '').replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return { ok: false, message: 'آدرس مخزن معتبر نیست؛ نمونه: owner/repo' };
+const branchInput = branchParts.join(' ').trim();
+if (branchInput && (!/^[A-Za-z0-9._/-]+$/.test(branchInput) || branchInput.startsWith('/') || branchInput.endsWith('/') || branchInput.includes('..'))) {
+return { ok: false, message: 'نام برنچ معتبر نیست.' };
+}
+try {
+const { data } = await ghRequest(token, 'GET', `/repos/${repo}`);
+const fullRepo = data.full_name || repo;
+const branch = branchInput || data.default_branch || 'main';
+await env.STATS.put(projectRepoKey(chatId, project.id), JSON.stringify({ repo: fullRepo, branch, linked_at: new Date().toISOString() }));
+return { ok: true, repo: fullRepo, branch, message: `✅ پروژهٔ «${project.name}» به ${fullRepo} وصل شد (برنچ ${branch}).` };
+} catch (e) { return { ok: false, message: `اتصال مخزن انجام نشد: ${e.message}` }; }
+}
+
+async function sendProjectGithubMenu(chatId, userId, env, notice = '') {
+const project = await getActiveProject(chatId, env);
+if (!project) { await sendProjectMenu(chatId, env, 'برای اتصال مخزن ابتدا یک پروژه را فعال کن.'); return; }
+const linked = await getProjectRepo(chatId, project.id, env);
+const token = await getGithubToken(userId, env);
+let text = `${notice ? `${notice}\n\n` : ''}🐙 <b>مخزن GitHub پروژه</b>\nپروژه: «${project.name}»\n`;
+text += linked ? `مخزن: <code>${escapeHtml(linked.repo)}</code>\nبرنچ: <code>${escapeHtml(linked.branch)}</code>` : 'هنوز مخزنی وصل نشده است.';
+text += token ? '' : '\n\n⚠️ ابتدا با /github توکن متصل کن.';
+const buttons = linked
+? [
+[{ text: '⬇️ دریافت فایل‌های جدید', callback_data: 'project:pull' }],
+[{ text: '⬆️ ارسال به GitHub', callback_data: 'project:push' }],
+[{ text: '🔄 اتصال/تغییر مخزن', callback_data: 'project:link' }],
+[{ text: '🔌 قطع اتصال مخزن', callback_data: 'project:unlink' }],
+[{ text: '↩️ بازگشت به پروژه‌ها', callback_data: 'project:menu' }]
+]
+: [
+[{ text: '🔗 اتصال مخزن', callback_data: 'project:link' }],
+[{ text: '↩️ بازگشت به پروژه‌ها', callback_data: 'project:menu' }]
+];
+await sendMessage(chatId, text, env, { inline_keyboard: buttons }, 'HTML');
+}
+
+function isSafeProjectFilePath(path) {
+const raw = String(path || '');
+const clean = cleanRepoPath(raw);
+return !!clean && !raw.startsWith('/') && !clean.split('/').some(part => !part || part === '.' || part === '..') &&
+!raw.startsWith('\\') &&
+!ZIP_SECRET_FILES.test(clean) && !ZIP_SKIP_DIRS.test(`${clean}/`);
+}
+
+function projectSyncFiles(workspace) {
+return (workspace?.files || []).filter(file => isSafeProjectFilePath(file.path) && !ZIP_SECRET_FILES.test(file.path));
+}
+
+async function pullProjectRepo(chatId, userId, env, overwrite = false) {
+const project = await getActiveProject(chatId, env);
+if (!project) { await sendProjectGithubMenu(chatId, userId, env, 'پروژه‌ای فعال نیست.'); return; }
+const linked = await getProjectRepo(chatId, project.id, env);
+const token = await getGithubToken(userId, env);
+if (!linked) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا مخزن را به پروژه وصل کن.'); return; }
+if (!token) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا با /github توکن وصل کن.'); return; }
+try {
+const treeResult = await ghRequest(token, 'GET', `/repos/${linked.repo}/git/trees/${encodePath(linked.branch)}?recursive=1`);
+if (treeResult.data.truncated) throw new Error('درخت مخزن از حد GitHub بزرگ‌تر است؛ برای جلوگیری از دریافت ناقص، سینک متوقف شد.');
+const candidates = [];
+let plannedBytes = 0, skipped = 0;
+for (const entry of treeResult.data.tree || []) {
+if (entry.type !== 'blob' || !isSafeProjectFilePath(entry.path)) { skipped++; continue; }
+if ((entry.size || 0) > 2 * 1024 * 1024 || candidates.length >= 200 || plannedBytes + (entry.size || 0) > 10 * 1024 * 1024) { skipped++; continue; }
+candidates.push(entry);
+plannedBytes += entry.size || 0;
+}
+const existing = await getWorkspace(chatId, env);
+const existingPaths = new Set((existing.files || []).map(f => cleanRepoPath(f.path)));
+const toDownload = candidates.filter(entry => overwrite || !existingPaths.has(entry.path));
+const conflicts = candidates.length - toDownload.length;
+const imported = [];
+let downloadedBytes = 0;
+for (let i = 0; i < toDownload.length; i += 4) {
+const batch = toDownload.slice(i, i + 4);
+const files = await Promise.all(batch.map(async entry => {
+const { data } = await ghRequest(token, 'GET', `/repos/${linked.repo}/git/blobs/${encodeURIComponent(entry.sha)}`);
+if (data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error(`محتوای ${entry.path} از GitHub قابل دریافت نبود.`);
+const bytes = base64ToBytes(data.content);
+return bytesToWsFile(entry.path, bytes);
+}));
+for (const file of files) {
+if ((file.size || 0) > 2 * 1024 * 1024 || downloadedBytes + (file.size || 0) > 10 * 1024 * 1024) { skipped++; continue; }
+imported.push(file);
+downloadedBytes += file.size || 0;
+}
+}
+if (imported.length) await addFilesToWorkspace(chatId, imported, env, null);
+const report = `⬇️ دریافت از ${linked.repo}@${linked.branch} تمام شد: ${imported.length} فایل اضافه/به‌روزرسانی شد.` +
+(conflicts ? ` ${conflicts} فایل هم‌نام حفظ شد${overwrite ? '' : ' (برای جایگزینی صریح، /project pull overwrite را اجرا کن)'}.` : '') +
+(skipped ? ` ${skipped} فایل به‌خاطر نوع/حجم/محدودیت کنار گذاشته شد.` : '');
+await sendProjectGithubMenu(chatId, userId, env, report);
+} catch (e) {
+await sendProjectGithubMenu(chatId, userId, env, `❌ دریافت مخزن ناموفق بود: ${e.message}`);
+}
+}
+
+async function projectFilesFingerprint(files) {
+const source = JSON.stringify(files.map(f => [f.path, f.size, f.text ?? null, f.b64 ?? null]));
+const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function startProjectPush(chatId, userId, env) {
+const project = await getActiveProject(chatId, env);
+if (!project) { await sendProjectGithubMenu(chatId, userId, env, 'پروژه‌ای فعال نیست.'); return; }
+const linked = await getProjectRepo(chatId, project.id, env);
+const token = await getGithubToken(userId, env);
+if (!linked) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا مخزن را به پروژه وصل کن.'); return; }
+if (!token) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا با /github توکن وصل کن.'); return; }
+const ws = await getWorkspace(chatId, env);
+const files = projectSyncFiles(ws);
+if (!files.length) { await sendProjectGithubMenu(chatId, userId, env, 'فایل امنی در workspace پروژه برای ارسال نیست.'); return; }
+if (files.length > 300) { await sendProjectGithubMenu(chatId, userId, env, 'تعداد فایل‌ها بیش از حد مجاز برای یک sync است (حداکثر ۳۰۰).'); return; }
+const fingerprint = await projectFilesFingerprint(files);
+await env.STATS.put(projectPushPlanKey(chatId), JSON.stringify({ projectId: project.id, repo: linked.repo, branch: linked.branch, fingerprint }), { expirationTtl: 300 });
+const list = files.slice(0, 12).map(f => `• ${escapeHtml(f.path)}`).join('\n');
+await sendMessage(chatId,
+`⚠️ <b>تأیید ارسال به GitHub</b>\nمخزن: <code>${escapeHtml(linked.repo)}</code>\nبرنچ: <code>${escapeHtml(linked.branch)}</code>\nفایل‌ها: ${files.length}\n\n${list}${files.length > 12 ? `\n… و ${files.length - 12} فایل دیگر` : ''}\n\nفقط فایل‌های workspace اضافه/به‌روزرسانی می‌شوند؛ فایل‌های دیگر مخزن حذف نمی‌شوند. برای ادامه، تأیید کن.`,
+env,
+{ inline_keyboard: [[{ text: '✅ تأیید و ارسال', callback_data: 'project:push_confirm' }, { text: '❌ لغو', callback_data: 'project:push_cancel' }]] },
+'HTML');
+}
+
+async function confirmProjectPush(chatId, userId, env) {
+const raw = await env.STATS.get(projectPushPlanKey(chatId));
+if (!raw) { await sendProjectGithubMenu(chatId, userId, env, 'پیش‌نمایش منقضی شده؛ دوباره ارسال را شروع کن.'); return; }
+let plan;
+try { plan = JSON.parse(raw); } catch (e) { await env.STATS.delete(projectPushPlanKey(chatId)); await sendProjectGithubMenu(chatId, userId, env, 'پیش‌نمایش معتبر نیست؛ دوباره تلاش کن.'); return; }
+const project = await getActiveProject(chatId, env);
+const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
+if (!project || project.id !== plan.projectId || !linked || linked.repo !== plan.repo || linked.branch !== plan.branch) {
+await env.STATS.delete(projectPushPlanKey(chatId));
+await sendProjectGithubMenu(chatId, userId, env, 'پروژه یا مقصد عوض شده؛ پیش‌نمایش قبلی لغو شد.');
+return;
+}
+const ws = await getWorkspace(chatId, env);
+const files = projectSyncFiles(ws);
+if (!files.length || await projectFilesFingerprint(files) !== plan.fingerprint) {
+await env.STATS.delete(projectPushPlanKey(chatId));
+await sendProjectGithubMenu(chatId, userId, env, 'فایل‌های workspace بعد از پیش‌نمایش تغییر کرده‌اند؛ برای امنیت، دوباره پیش‌نمایش بگیر.');
+return;
+}
+const token = await getGithubToken(userId, env);
+if (!token) { await env.STATS.delete(projectPushPlanKey(chatId)); await sendProjectGithubMenu(chatId, userId, env, 'توکن GitHub در دسترس نیست؛ دوباره /github را وصل کن.'); return; }
+await env.STATS.delete(projectPushPlanKey(chatId));
+try {
+const result = await githubPushFiles(token, linked.repo, {
+branch: linked.branch,
+message: `Sync project ${project.name}`,
+files: files.map(f => ({ path: cleanRepoPath(f.path), text: f.text, b64: f.b64 }))
+});
+await sendProjectGithubMenu(chatId, userId, env, `✅ ارسال کامل شد: ${result.files_pushed || files.length} فایل به ${linked.repo}@${linked.branch}. ${result.commit_url || ''}`);
+} catch (e) {
+await sendProjectGithubMenu(chatId, userId, env, `❌ ارسال ناموفق بود: ${e.message}`);
+}
+}
+
+async function createProject(chatId, name, env) {
+const cleanName = String(name || '').trim().replace(/\s+/g, ' ');
+if (!cleanName || cleanName.length > 40 || !/^[\p{L}\p{N} _.-]+$/u.test(cleanName)) {
+return { ok: false, message: 'نام پروژه باید ۱ تا ۴۰ نویسه باشد و از حروف، عدد، فاصله، نقطه، خط تیره یا زیرخط تشکیل شود.' };
+}
+const projects = await getProjects(chatId, env);
+if (projects.length >= MAX_PROJECTS_PER_CHAT) return { ok: false, message: `حداکثر ${MAX_PROJECTS_PER_CHAT} پروژه می‌توانی داشته باشی.` };
+if (projects.some(p => normalizeProjectName(p.name) === normalizeProjectName(cleanName))) {
+return { ok: false, message: 'پروژه‌ای با این نام از قبل وجود دارد.' };
+}
+const project = { id: crypto.randomUUID().replace(/-/g, ''), name: cleanName, created_at: new Date().toISOString() };
+projects.push(project);
+await env.STATS.put(projectsKey(chatId), JSON.stringify(projects));
+await env.STATS.put(activeProjectKey(chatId), project.id);
+return { ok: true, project, message: `✅ پروژهٔ «${cleanName}» ساخته و فعال شد.` };
+}
+
+async function startProjectCreateFlow(chatId, env) {
+await env.STATS.put(projectFlowKey(chatId), 'name', { expirationTtl: 600 });
+await sendMessage(chatId, '✏️ اسم پروژهٔ جدید را بفرست (حداکثر ۴۰ نویسه).', env, {
+inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]]
+});
+}
+
+async function handleProjectFlowInput(chatId, userId, text, env) {
+const flow = await env.STATS.get(projectFlowKey(chatId));
+if (!flow) return false;
+if (flow === 'repo') {
+const result = await linkProjectRepo(chatId, userId, text, env);
+if (!result.ok) {
+await sendMessage(chatId, `⚠️ ${result.message}\n\nآدرس دیگری بفرست یا لغو کن.`, env, {
+inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]]
+});
+return true;
+}
+await env.STATS.delete(projectFlowKey(chatId));
+await sendProjectGithubMenu(chatId, userId, env, result.message);
+return true;
+}
+if (flow !== 'name') return false;
+const result = await createProject(chatId, text, env);
+if (!result.ok) {
+await sendMessage(chatId, `⚠️ ${result.message}\n\nاسم دیگری بفرست یا لغو کن.`, env, {
+inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]]
+});
+return true;
+}
+await env.STATS.delete(projectFlowKey(chatId));
+await sendProjectMenu(chatId, env, result.message);
+return true;
+}
+
+async function handleProjectCommand(chatId, userId, args, env) {
+const action = (args[0] || '').toLowerCase();
+const name = args.slice(1).join(' ').trim();
+if (!action) {
+await sendProjectMenu(chatId, env, 'دستورها: /project new <نام> برای ساخت مستقیم، /project delete <نام> برای حذف.');
+return;
+}
+if (action === 'list' || action === 'ls') {
+await sendProjectMenu(chatId, env);
+return;
+}
+if (action === 'new' || action === 'create') {
+if (!name) {
+await startProjectCreateFlow(chatId, env);
+return;
+}
+const result = await createProject(chatId, name, env);
+await sendProjectMenu(chatId, env, result.message);
+return;
+}
+if (action === 'repo') {
+if (name.toLowerCase() === 'off') {
+const project = await getActiveProject(chatId, env);
+if (project) await env.STATS.delete(projectRepoKey(chatId, project.id));
+await sendProjectGithubMenu(chatId, userId, env, 'اتصال مخزن از پروژه جدا شد؛ فایل‌های workspace حفظ شدند.');
+return;
+}
+if (!name) { await sendProjectGithubMenu(chatId, userId, env); return; }
+const result = await linkProjectRepo(chatId, userId, name, env);
+await sendProjectGithubMenu(chatId, userId, env, result.message);
+return;
+}
+if (action === 'sync') { await sendProjectGithubMenu(chatId, userId, env); return; }
+if (action === 'pull') { await pullProjectRepo(chatId, userId, env, (args[1] || '').toLowerCase() === 'overwrite'); return; }
+if (action === 'push') { await startProjectPush(chatId, userId, env); return; }
+if (action === 'use' || action === 'switch') {
+const projects = await getProjects(chatId, env);
+const project = projects.find(p => normalizeProjectName(p.name) === normalizeProjectName(name));
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه پیدا نشد.'); return; }
+await env.STATS.put(activeProjectKey(chatId), project.id);
+await sendProjectMenu(chatId, env, `✅ پروژهٔ «${project.name}» فعال شد.`);
+return;
+}
+if (['off', 'default'].includes(action)) {
+await env.STATS.delete(activeProjectKey(chatId));
+await sendProjectMenu(chatId, env, '✅ به فضای پیش‌فرض برگشتی؛ داده‌های پروژه‌ها حفظ شده‌اند.');
+return;
+}
+if (['delete', 'remove'].includes(action)) {
+const projects = await getProjects(chatId, env);
+const active = await getActiveProject(chatId, env);
+const project = projects.find(p => normalizeProjectName(p.name) === normalizeProjectName(name));
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه پیدا نشد.'); return; }
+await env.STATS.delete(`ws:${chatId}:project:${project.id}`);
+await ensureSchema(env);
+await env.DB.prepare('DELETE FROM project_chat_history WHERE chat_id = ? AND project_id = ?').bind(chatId, project.id).run();
+await env.STATS.put(projectsKey(chatId), JSON.stringify(projects.filter(p => p.id !== project.id)));
+if (active?.id === project.id) await env.STATS.delete(activeProjectKey(chatId));
+await sendProjectMenu(chatId, env, `🗑 پروژهٔ «${project.name}» و داده‌های اختصاصی‌اش حذف شد.`);
+return;
+}
+await sendProjectMenu(chatId, env, 'دستور پروژه را نشناختم.');
 }
 
 // =============== مدیریت پیام‌های تلگرام ===============
@@ -1020,6 +1442,8 @@ await handleDocument(chatId, document, caption, env, userId);
 await incrementStat('total_files', env);
 } else if (text.startsWith('/')) {
 await handleCommand(chatId, userId, text, env, messageId);
+} else if (await handleProjectFlowInput(chatId, userId, text, env)) {
+// نام پروژه در جریان ساخت با دکمه دریافت شد
 } else if (looksLikeGithubToken(text)) {
 // کاربر توکن را بدون دستور فرستاده
 await saveGithubTokenFromChat(chatId, userId, text.trim(), env, messageId);
@@ -1063,6 +1487,11 @@ let help = '📋 راهنما:\n\n' +
 '/start - شروع مجدد\n' +
 '/help - نمایش این راهنما\n' +
 '/ai - اتصال مدل هوش مصنوعی شخصی (Base URL + API Key + نام مدل)\n' +
+'/project - ساخت و جابه‌جایی بین پروژه‌ها (حافظه و فضای کار جداگانه)\n' +
+'/project repo <owner/repo> [branch] - اتصال مخزن به پروژهٔ فعال\n' +
+'/project sync - منوی GitHub پروژه\n' +
+'/project pull [overwrite] - دریافت فایل‌های مخزن (بدون overwrite پیش‌فرض)\n' +
+'/project push - پیش‌نمایش و ارسال workspace پس از تأیید\n' +
 '/lang <زبان> - تنظیم زبان پیش‌فرض\n' +
 '/clear - پاک کردن حافظه گفتگو\n\n' +
 '🤖 قابلیت‌ها:\n' +
@@ -1097,6 +1526,11 @@ const lang = args[0].toLowerCase();
 await env.DB.prepare('UPDATE users SET preferred_language = ? WHERE id = ?').bind(lang, userId).run();
 await sendMessage(chatId, `✅ زبان پیش‌فرض شما به «${lang}» تغییر یافت.`, env);
 }
+break;
+}
+
+case '/project': {
+await handleProjectCommand(chatId, userId, args, env);
 break;
 }
 
@@ -1138,7 +1572,8 @@ break;
 }
 
 case '/workspace_clear': {
-await env.STATS.delete(wsKey(chatId));
+const project = await getActiveProject(chatId, env);
+await env.STATS.delete(wsKey(chatId, project?.id || null));
 await sendMessage(chatId, 'فضای کار خالی شد.', env);
 break;
 }
@@ -1713,11 +2148,15 @@ function utf8ToBase64(str) {
 return arrayBufferToBase64(new TextEncoder().encode(str).buffer);
 }
 
-function base64ToUtf8(b64) {
+function base64ToBytes(b64) {
 const bin = atob(String(b64).replace(/\s/g, ''));
 const bytes = new Uint8Array(bin.length);
 for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-return new TextDecoder().decode(bytes);
+return bytes;
+}
+
+function base64ToUtf8(b64) {
+return new TextDecoder().decode(base64ToBytes(b64));
 }
 
 // پوش چند فایل در یک کامیت (Git Data API) — مخزن خالی و برنچ جدید هم پشتیبانی می‌شود
@@ -1831,10 +2270,11 @@ note: bootstrapped ? `مخزن خالی بود؛ «${bootstrapped}» کامیت 
 }
 
 // ---------- فضای کار (Workspace): فایل‌های ارسالی کاربر برای ویرایش و پوش ----------
-function wsKey(chatId) { return `ws:${chatId}`; }
+function wsKey(chatId, projectId = null) { return projectId ? `ws:${chatId}:project:${projectId}` : `ws:${chatId}`; }
 
 async function getWorkspace(chatId, env) {
-const raw = await env.STATS.get(wsKey(chatId));
+const project = await getActiveProject(chatId, env);
+const raw = await env.STATS.get(wsKey(chatId, project?.id || null));
 if (!raw) return { name: '', files: [] };
 try { return JSON.parse(raw); } catch (e) { return { name: '', files: [] }; }
 }
@@ -1844,7 +2284,8 @@ const total = ws.files.reduce((a, f) => a + (f.size || 0), 0);
 if (total > WS_MAX_TOTAL_BYTES) throw new Error(`حجم فضای کار بیش از ${formatSizeClient(WS_MAX_TOTAL_BYTES)} است`);
 ws.updated_at = new Date().toISOString();
 // فضای کار ۷ روز نگه داشته می‌شود
-await env.STATS.put(wsKey(chatId), JSON.stringify(ws), { expirationTtl: 7 * 24 * 3600 });
+const project = await getActiveProject(chatId, env);
+await env.STATS.put(wsKey(chatId, project?.id || null), JSON.stringify(ws), { expirationTtl: 7 * 24 * 3600 });
 }
 
 function bytesToWsFile(path, bytes) {
@@ -2216,8 +2657,12 @@ const history = await getHistory(chatId, env, settings);
 
 // زمینه: وضعیت اتصال گیت‌هاب و فضای کار (بدون افشای توکن)
 const token = await getGithubToken(userId, env);
+const activeProject = await getActiveProject(chatId, env);
+const linkedRepo = activeProject ? await getProjectRepo(chatId, activeProject.id, env) : null;
 const ws = await getWorkspace(chatId, env);
 let context = `\n\nوضعیت فعلی:\n- گیت‌هاب: ${token ? 'وصل است (توکن ذخیره شده)' : 'وصل نیست — اگر کاربر کار گیت‌هابی خواست، بگو توکن را با /github <توکن> بفرستد'}`;
+context += `\n- پروژهٔ فعال: ${activeProject ? `«${activeProject.name}» (حافظه و فضای کار جداگانه)` : 'حالت پیش‌فرض ربات'}`;
+if (linkedRepo) context += `\n- مخزن GitHub پروژه: ${linkedRepo.repo} (برنچ ${linkedRepo.branch})`;
 context += `\n- فضای کار: ${ws.files.length ? `«${ws.name || 'بدون نام'}» با ${ws.files.length} فایل` : 'خالی'}`;
 context += `\n- تاریخ: ${new Date().toISOString().slice(0, 10)}`;
 if (opts.isCode) context += '\n- پیام کاربر احتمالاً کد یا لاگ خطاست؛ مشکل واقعی را پیدا کن و راه‌حل بده.';
