@@ -192,6 +192,18 @@ const telegramCommandNames = telegramCommands.map(command => command.command);
 check('فرمان‌های ربات در منوی رسمی تلگرام ثبت می‌شوند', ['start', 'help', 'ai', 'login', 'logout', 'project', 'github', 'github_off', 'cloudflare', 'workspace', 'workspace_clear', 'lang', 'search', 'debug', 'clear', 'new'].every(command => telegramCommandNames.includes(command)), telegramCommandNames);
 check('start با دکمه‌های inline', !!sk?.inline_keyboard && !sk.keyboard, sk);
 check('دکمه اتصال در کیبورد', JSON.stringify(sk).includes('🔌 اتصال مدل'));
+await fire(msg('/help'));
+const helpMessage = lastBotMsg().body;
+const helpButtons = helpMessage.reply_markup?.inline_keyboard || [];
+check('راهنمای اصلی کوتاه است و کیبورد شیشه‌ای دسته‌بندی دارد', helpMessage.parse_mode === 'HTML' && helpMessage.text.includes('<b>راهنمای ربات</b>') && helpButtons.flat().some(button => button.callback_data === 'help:projects') && helpButtons.flat().some(button => button.callback_data === 'help:commands'), helpMessage);
+await fire(cb('help:projects'));
+const projectHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
+check('دکمهٔ پروژه‌ها راهنمای فرمان‌های پروژه را در همان پیام باز می‌کند', projectHelpEdit?.text.includes('<code>/project push</code>') && projectHelpEdit.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'help:home', projectHelpEdit);
+await fire(cb('help:commands'));
+const commandsHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
+check('دکمهٔ همهٔ دستورها فهرست فرمان‌های اصلی را نشان می‌دهد', commandsHelpEdit?.text.includes('<code>/debug</code>') && commandsHelpEdit.text.includes('<code>/cloudflare</code>') && commandsHelpEdit.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'help:home', commandsHelpEdit);
+await fire(cb('help:home'));
+check('بازگشت، منوی راهنمای اصلی و دکمه‌های دسته‌ها را برمی‌گرداند', [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body?.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'help:files'));
 
 // ۲) /ai منو را نشان می‌دهد
 await fire(msg('/login'));

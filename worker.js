@@ -690,6 +690,80 @@ inline_keyboard: [[{ text: BTN.cancel, callback_data: 'ai:cancel' }]]
 // منوی شیشه‌ای زیر پیام؛ دکمه‌های قدیمیِ reply keyboard هم همچنان پذیرفته می‌شوند.
 function aiMenuKeyboard(connected) { return mainKeyboard(connected); }
 
+function helpPanelKeyboard(section = 'home') {
+if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
+return { inline_keyboard: [
+[{ text: '🧠 دستیار', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
+[{ text: '🐙 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '📎 فایل‌ها', callback_data: 'help:files' }],
+[{ text: '⌨️ همهٔ دستورها', callback_data: 'help:commands' }]
+] };
+}
+
+function helpPanelText(section, aiConnected) {
+if (section === 'ai') return [
+'🧠 <b>دستیار و کدنویسی</b>',
+'<code>/ai</code> یا <code>/login</code>  اتصال و مدیریت مدل هوش مصنوعی',
+'<code>/logout</code>  قطع اتصال مدل',
+'<code>/debug</code>  تحلیل و دیباگ کد یا خطا',
+'<code>/search [عبارت]</code>  جست‌وجوی وب',
+aiConnected ? 'مدل هوش مصنوعی متصل است و برای چت، دیباگ و تحلیل فایل استفاده می‌شود.' : 'برای فعال‌شدن پاسخ‌گویی هوشمند، مدل را از مسیر <code>/ai</code> وصل کن.'
+].join('\n');
+if (section === 'projects') return [
+'📂 <b>پروژه‌ها و GitHub</b>',
+'<code>/project</code>  ساخت، انتخاب و جابه‌جایی پروژه‌ها',
+'<code>/project repo [owner/repo] [branch]</code>  اتصال مخزن',
+'<code>/project sync</code>  بازکردن منوی همگام‌سازی',
+'<code>/project pull [overwrite]</code>  دریافت فایل‌های مخزن',
+'<code>/project push</code>  پیش‌نمایش و ارسال فایل‌ها',
+'هر پروژه حافظه و فضای کار جدا دارد. جایگزینی فایل یا ارسال تغییرات پیش از اجرا تأیید می‌شود.'
+].join('\n');
+if (section === 'accounts') return [
+'🐙 <b>اتصال حساب‌ها</b>',
+'<code>/github</code>  دیدن وضعیت یا اتصال با <code>/github &lt;token&gt;</code>',
+'پیام حاوی توکن GitHub خودکار حذف می‌شود؛ اگر حذف نشد، خودت آن را پاک کن.',
+'<code>/github_off</code>  قطع GitHub',
+'<code>/cloudflare</code>  اتصال امن یا مدیریت Cloudflare',
+'توکن Cloudflare را فقط در فرم HTTPS خصوصی وارد کن، نه در چت.',
+'<code>/cloudflare off</code>  قطع اتصال Cloudflare'
+].join('\n');
+if (section === 'files') return [
+'📎 <b>کد و فایل‌ها</b>',
+'کد یا سؤال را مستقیم بفرست تا پاسخ بگیری.',
+'عکس خطا، فایل کد یا ZIP پروژه را هم می‌توانی ارسال کنی؛ توضیحت را در کپشن بنویس.',
+'<code>/workspace</code>  دیدن فایل‌های فضای کار',
+'<code>/workspace_clear</code>  خالی‌کردن فضای کار (با تأیید)'
+].join('\n');
+if (section === 'commands') return [
+'⌨️ <b>فهرست دستورها</b>',
+'<code>/start</code>  نمایش منوی اصلی',
+'<code>/help</code>  راهنمای تعاملی',
+'<code>/ai</code>، <code>/login</code>، <code>/logout</code>  مدیریت مدل',
+'<code>/project</code>  مدیریت پروژه‌ها',
+'<code>/project repo</code>، <code>/project sync</code>، <code>/project pull</code>، <code>/project push</code>  اتصال و همگام‌سازی مخزن',
+'<code>/github</code>، <code>/github_off</code>، <code>/cloudflare</code>  اتصال حساب‌ها',
+'<code>/workspace</code>، <code>/workspace_clear</code>  مدیریت فایل‌ها',
+'<code>/search [عبارت]</code>، <code>/debug</code>، <code>/lang [زبان]</code>  جست‌وجو، تحلیل و تنظیم زبان',
+'<code>/clear</code> یا <code>/new</code>  پاک‌کردن حافظهٔ گفتگو'
+].join('\n');
+let text = '🧭 <b>راهنمای ربات</b>\nیک بخش را انتخاب کن تا دستورها و روش استفاده را ببینی؛ یا خواسته‌ات را به زبان طبیعی بنویس.';
+if (!aiConnected) text += '\n\n⚠️ برای استفاده از قابلیت‌های هوش مصنوعی، مدل را با <code>/ai</code> وصل کن.';
+return text;
+}
+
+async function sendHelpPanel(chatId, userId, env, section = 'home', messageId = null) {
+const aiConnected = await hasAnyAI(userId, env, await getSettingsData(env));
+const text = helpPanelText(section, aiConnected);
+const markup = helpPanelKeyboard(section);
+if (messageId) {
+await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+method: 'POST', headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', reply_markup: markup })
+});
+return;
+}
+await sendMessage(chatId, text, env, markup, 'HTML');
+}
+
 async function sendAiMenu(chatId, userId, env) {
 const conn = await getUserAIConn(userId, env);
 let text;
@@ -1011,6 +1085,13 @@ if (!chatId || !userId) return;
 try {
 if (data.startsWith('action:')) {
 await handleActionConfirmationCallback(cb, env);
+return;
+}
+if (data.startsWith('help:')) {
+const section = data.slice('help:'.length);
+if (['home', 'ai', 'projects', 'accounts', 'files', 'commands'].includes(section)) {
+await sendHelpPanel(chatId, userId, env, section, cb.message?.message_id);
+}
 return;
 }
 if (data.startsWith('project:')) {
@@ -1899,45 +1980,7 @@ break;
 }
 
 case '/help': {
-let help = '📋 راهنما:\n\n' +
-'/start - شروع مجدد\n' +
-'/help - نمایش این راهنما\n' +
-'/ai - اتصال مدل هوش مصنوعی شخصی (Base URL + API Key + نام مدل)\n' +
-'/login - میان‌بر اتصال مدل هوش مصنوعی شخصی\n' +
-'/logout - قطع اتصال مدل هوش مصنوعی شخصی\n' +
-'/project - ساخت و جابه‌جایی بین پروژه‌ها (حافظه و فضای کار جداگانه)\n' +
-'/project repo <owner/repo> [branch] - اتصال مخزن به پروژهٔ فعال\n' +
-'/project sync - منوی GitHub پروژه\n' +
-'/project pull [overwrite] - دریافت فایل‌های مخزن (بدون overwrite پیش‌فرض)\n' +
-'/project push - پیش‌نمایش و ارسال workspace پس از تأیید\n' +
-'/lang <زبان> - تنظیم زبان پیش‌فرض\n' +
-'/search <عبارت> - جستجوی وب\n' +
-'/debug <کد/خطا> - تحلیل و دیباگ کد یا خطا\n' +
-'/clear - پاک کردن حافظه گفتگو (میان‌بر: /new)\n\n' +
-'🤖 قابلیت‌ها:\n' +
-'• ارسال کد (متنی) → دیباگ خودکار با هوش مصنوعی\n' +
-'• ارسال سوال → پاسخ از هوش مصنوعی (با حافظه گفتگو)\n' +
-'• search: عبارت → جستجوی وب\n' +
-'• 📷 ارسال اسکرین‌شات خطا → خواندن خطا از تصویر و ارائه راه‌حل\n' +
-'• 📄 ارسال فایل کد → تحلیل و دیباگ فایل\n' +
-'• 🗜️ ارسال ZIP مخزن → باز کردن و خواندن کامل کدها و پیدا کردن باگ‌ها\n' +
-'• می‌توانید زیر عکس/فایل توضیح یا سوال خود را بنویسید (Caption)\n\n' +
-'🧠 هوش مصنوعی شخصی:\n' +
-'اگر به مدل پولی یا رایگان دسترسی داری، با /ai یا دکمه‌های ربات وصلش کن تا همه قابلیت‌ها با مدل خودت کار کنه.\n\n' +
-'🐙 گیت‌هاب:\n' +
-'/github <توکن> - وصل کردن گیت‌هاب (پیام توکن خودکار پاک می‌شود)\n' +
-'/github - وضعیت اتصال\n' +
-'/github_off - حذف توکن\n' +
-'/cloudflare - اتصال امن، وضعیت یا مدیریت حساب Cloudflare\n' +
-'• اتصال Cloudflare در چت خصوصی با فرم HTTPS انجام می‌شود؛ توکن را داخل تلگرام نفرست.\n' +
-'/cloudflare off - قطع اتصال و حذف توکن رمزگذاری‌شده\n' +
-'/workspace - فایل‌های آماده برای پوش\n' +
-'/workspace_clear - خالی کردن فضای کار\n' +
-'بعد از وصل شدن، کافیه طبیعی بگی؛ مثلاً: «این ZIP رو تو یه ریپو خصوصی جدید به اسم my-app پوش کن»';
-if (!(await hasAnyAI(userId, env, settings))) {
-help += '\n\n⚠️ هوش مصنوعی هنوز تنظیم نشده است! می‌توانید با /ai مدل شخصی خودتان را وصل کنید.';
-}
-await sendMessage(chatId, help, env, aiMenuKeyboard(!!(await getUserAIConn(userId, env))));
+await sendHelpPanel(chatId, userId, env);
 break;
 }
 
