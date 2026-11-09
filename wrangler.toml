@@ -21,6 +21,8 @@ id = "42ea39d7093b474b99da956e06eef68a"
 # Fail CI deploys early if the bot token is not configured as a Worker secret.
 [secrets]
 required = ["TELEGRAM_BOT_TOKEN"]
+# Cloudflare per-user integration is optional; when enabled, set separately:
+# npx wrangler secret put CLOUDFLARE_ENCRYPTION_KEY
 
 # Environment Variables (Secrets should be set via wrangler secret)
 [vars]

@@ -53,7 +53,7 @@ ${STYLE}`
 };
 
 // پرامپت حالت «ایجنت» — ربات با ابزارها کار واقعی انجام می‌دهد (گیت‌هاب، فایل‌ها، جستجو)
-const AGENT_PROMPT = `تو یک دستیار هوشمند و رفیق کاربر هستی که برنامه‌نویسی را خیلی خوب بلدی و می‌توانی با ابزارهایی که داری کار واقعی انجام بدهی (ساخت مخزن گیت‌هاب، کامیت و پوش، خواندن و ویرایش فایل‌ها، ساخت برنچ و Pull Request، جستجوی وب).
+const AGENT_PROMPT = `تو یک دستیار هوشمند و رفیق کاربر هستی که برنامه‌نویسی را خیلی خوب بلدی و می‌توانی با ابزارهایی که داری کار واقعی انجام بدهی (ساخت مخزن گیت‌هاب، کامیت و پوش، خواندن و ویرایش فایل‌ها، ساخت برنچ و Pull Request، مدیریت DNS در Cloudflare، مشاهدهٔ Zoneها و Workerها، جستجوی وب).
 
 روش کار تو (خیلی مهم):
 1. اول دقیق بفهم کاربر چه می‌خواهد. اگر چیز مهمی مبهم است (مثلاً اسم مخزن، عمومی/خصوصی، کدام برنچ) و نمی‌شود از گفتگو فهمید، یک سوال کوتاه بپرس. در غیر این صورت سوال نپرس و کار را انجام بده.
@@ -69,6 +69,7 @@ const AGENT_PROMPT = `تو یک دستیار هوشمند و رفیق کاربر
 - مخزن جدید را به‌طور پیش‌فرض خصوصی (private) بساز، مگر کاربر عمومی خواسته باشد.
 - فایل‌های حاوی رمز و توکن (مثل .env) را پوش نکن و اگر در کد توکن یا رمز دیدی به کاربر هشدار بده.
 - توکن‌ها را هیچ‌وقت در جواب ننویس؛ تو به خود توکن دسترسی نداری و ابزارها خودشان از آن استفاده می‌کنند.
+- هر عملیات تغییردهندهٔ DNS فقط پس از preview روشن و تأیید صریح تلگرامی اجرا می‌شود. Cloudflare فقط در گفت‌وگوی خصوصی قابل استفاده است؛ برای عملیات مربوط به Worker فعلاً فقط فهرست/تنظیمات خوانده می‌شود و سورس یا secretهای Worker دریافت نمی‌شود.
 - پیام کامیت را کوتاه، معنادار و انگلیسی بنویس (مگر کاربر چیز دیگری بخواهد).
 
 اگر پیام کاربر فقط گپ یا سوال است، ابزار صدا نزن و طبیعی جواب بده.
@@ -124,6 +125,10 @@ headers: {
 
 const url = new URL(request.url);
 
+if (url.pathname === '/connect/cloudflare' && ['GET', 'POST'].includes(request.method)) {
+return await handleCloudflareConnectPage(request, env);
+}
+
 // ============ مسیرهای Webhook ============
 if (url.pathname === '/webhook' && request.method === 'POST') {
 // اگر WEBHOOK_SECRET تنظیم شده، فقط درخواست‌های تلگرام پذیرفته می‌شوند
@@ -137,7 +142,7 @@ if (await isDuplicateUpdate(update.update_id, env)) {
 return new Response('OK', { status: 200 });
 }
 // پردازش ادامه پیدا می‌کند حتی اگر تلگرام زودتر قطع کند (waitUntil)
-const job = handleUpdate(update, env);
+const job = handleUpdate(update, env, url.origin);
 if (ctx && ctx.waitUntil) ctx.waitUntil(job);
 await job;
 return new Response('OK', { status: 200 });
@@ -740,6 +745,224 @@ return String(content).trim().substring(0, 60);
 }
 
 // دکمه‌های شیشه‌ای منو و callbackهای قدیمی
+const ACTION_APPROVAL_TTL_SECONDS = 300;
+const MAX_ACTION_APPROVAL_PAYLOAD_BYTES = 20 * 1024 * 1024;
+const READ_ONLY_AGENT_TOOLS = new Set([
+'github_whoami', 'github_list_repos', 'github_get_repo', 'github_list_files', 'github_read_file',
+'cloudflare_list_zones', 'cloudflare_list_dns_records', 'cloudflare_list_workers', 'cloudflare_get_worker',
+'workspace_list_files', 'workspace_read_file', 'web_search'
+]);
+
+function agentToolNeedsApproval(name) {
+// پیش‌فرض امن: ابزار تازه تا وقتی صریحاً read-only اعلام نشده، نیازمند تأیید است.
+return !READ_ONLY_AGENT_TOOLS.has(name);
+}
+
+async function requestActionConfirmation(chatId, userId, env, { kind, payload, title, details }) {
+await ensureSchema(env);
+const serializedPayload = JSON.stringify(payload);
+if (new TextEncoder().encode(serializedPayload).length > MAX_ACTION_APPROVAL_PAYLOAD_BYTES) {
+throw new Error('حجم عملیات برای یک preview از حد امن بیشتر است؛ آن را به چند تغییر کوچک‌تر تقسیم کن.');
+}
+const id = crypto.randomUUID().replace(/-/g, '');
+const payloadKey = `action_approval_payload:${id}`;
+const now = Math.floor(Date.now() / 1000);
+const expiresAt = now + ACTION_APPROVAL_TTL_SECONDS;
+await env.DB.prepare(`DELETE FROM action_approvals
+WHERE (status = 'pending' AND expires_at < ?) OR (status != 'pending' AND resolved_at IS NOT NULL AND resolved_at < ?)`)
+.bind(now - 24 * 3600, now - 7 * 24 * 3600).run();
+await env.STATS.put(payloadKey, serializedPayload, { expirationTtl: ACTION_APPROVAL_TTL_SECONDS });
+try {
+await env.DB.prepare(`INSERT INTO action_approvals
+(id, chat_id, user_id, kind, payload_key, status, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`)
+.bind(id, String(chatId), String(userId), kind, payloadKey, now, expiresAt).run();
+} catch (error) {
+await env.STATS.delete(payloadKey);
+throw error;
+}
+await sendMessage(chatId,
+`⚠️ <b>تأیید لازم است</b>\n\n<b>${escapeHtml(title)}</b>\n${escapeHtml(details)}\n\nفقط با تأیید همین درخواست اجرا می‌شود. این پیش‌نمایش تا ۵ دقیقه معتبر است.`,
+env,
+{ inline_keyboard: [[
+{ text: '✅ تأیید و اجرا', callback_data: `action:yes:${id}` },
+{ text: '❌ لغو', callback_data: `action:no:${id}` }
+]] },
+'HTML');
+return id;
+}
+
+async function finishActionApproval(env, id, status) {
+await env.DB.prepare(`UPDATE action_approvals SET status = ?, resolved_at = ?
+WHERE id = ? AND status = 'executing'`)
+.bind(status, Math.floor(Date.now() / 1000), id).run();
+}
+
+async function handleActionConfirmationCallback(cb, env) {
+const chatId = cb.message?.chat?.id;
+const userId = cb.from?.id;
+const parts = String(cb.data || '').split(':');
+const decision = parts[1];
+const id = parts[2] || '';
+if (!chatId || !userId || !['yes', 'no'].includes(decision) || !/^[a-f0-9]{32}$/.test(id)) {
+if (chatId) await sendMessage(chatId, 'این دکمهٔ تأیید معتبر نیست.', env);
+return;
+}
+await ensureSchema(env);
+const row = await env.DB.prepare(`SELECT id, chat_id, user_id, kind, payload_key, status, expires_at
+FROM action_approvals WHERE id = ?`).bind(id).first();
+if (!row || String(row.user_id) !== String(userId) || String(row.chat_id) !== String(chatId)) {
+await sendMessage(chatId, 'این درخواست تأیید برای حساب یا گفت‌وگوی دیگری است.', env);
+return;
+}
+const now = Math.floor(Date.now() / 1000);
+const nextStatus = decision === 'yes' ? 'executing' : 'cancelled';
+const claimed = await env.DB.prepare(`UPDATE action_approvals SET status = ?, resolved_at = ?
+WHERE id = ? AND user_id = ? AND chat_id = ? AND status = 'pending' AND expires_at > ?`)
+.bind(nextStatus, now, id, String(userId), String(chatId), now).run();
+if (!claimed.meta?.changes) {
+if (row.expires_at <= now) {
+await env.DB.prepare(`UPDATE action_approvals SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`)
+.bind('expired', now, id).run();
+await env.STATS.delete(row.payload_key);
+}
+await sendMessage(chatId, row.expires_at <= now ? '⏱ این پیش‌نمایش منقضی شده؛ درخواست را دوباره بفرست.' : 'این درخواست قبلاً استفاده یا لغو شده است.', env);
+return;
+}
+if (decision === 'no') {
+await env.STATS.delete(row.payload_key);
+await sendMessage(chatId, 'لغو شد؛ هیچ تغییری اعمال نشد.', env);
+return;
+}
+
+const raw = await env.STATS.get(row.payload_key);
+if (!raw) {
+await finishActionApproval(env, id, 'expired');
+await sendMessage(chatId, '⏱ اطلاعات پیش‌نمایش منقضی شده؛ هیچ تغییری اعمال نشد. درخواست را دوباره بفرست.', env);
+return;
+}
+let payload;
+try { payload = JSON.parse(raw); }
+catch (error) {
+await env.STATS.delete(row.payload_key);
+await finishActionApproval(env, id, 'failed');
+await sendMessage(chatId, 'پیش‌نمایش قابل‌خواندن نیست؛ هیچ تغییری اعمال نشد.', env);
+return;
+}
+
+try {
+const result = await executeApprovedAction(row.kind, payload, { env, chatId, userId });
+await finishActionApproval(env, id, 'completed');
+await env.STATS.delete(row.payload_key);
+if (result?.reportedToChat) return;
+const label = row.kind === 'agent_tool' ? toolLabel(payload.toolName, payload.args || {}) : (payload.label || 'عملیات تأییدشده');
+const rendered = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+await sendLongMessage(chatId, `✅ اجرا شد: ${label}${rendered ? `\n\n${rendered}` : ''}`, env);
+if (row.kind === 'agent_tool' && payload.requestText) {
+const settings = await getSettingsData(env);
+await addHistory(chatId, [
+{ role: 'user', content: String(payload.requestText).substring(0, MEMORY_MAX_CHARS_PER_MSG) },
+{ role: 'assistant', content: `عملیات «${label}» پس از تأیید اجرا شد. نتیجه: ${String(rendered || 'موفق').substring(0, MEMORY_MAX_CHARS_PER_MSG)}` }
+], env, settings);
+}
+} catch (error) {
+await finishActionApproval(env, id, 'failed');
+await env.STATS.delete(row.payload_key);
+console.error('approved action failed:', row.kind, error?.message || error);
+await sendMessage(chatId, `❌ اجرای عملیات تأییدشده ناموفق بود: ${String(error.message || error).substring(0, 700)}`, env);
+}
+}
+
+async function executeApprovedAction(kind, payload, ctx) {
+const { env, chatId, userId } = ctx;
+if (kind === 'cloudflare_connect') {
+if (String(chatId) !== String(userId)) throw new Error('اتصال Cloudflare فقط در گفت‌وگوی خصوصی مجاز است.');
+const encrypted = payload?.encrypted;
+if (!encrypted?.ciphertext || !encrypted?.iv) throw new Error('دادهٔ اتصال امن ناقص است؛ دوباره اتصال را شروع کن.');
+const token = await decryptCloudflareToken(encrypted.ciphertext, encrypted.iv, userId, env);
+const metadata = await verifyCloudflareToken(token);
+await storeCloudflareCredential(userId, encrypted, metadata, env);
+return { ok: true, provider: 'Cloudflare', tokenId: metadata.tokenId || null, expiresOn: metadata.expiresOn || null, note: 'توکن با AES-GCM رمزگذاری و ذخیره شد.' };
+}
+if (kind === 'agent_tool') {
+const activeProject = await getActiveProject(chatId, env);
+if ((activeProject?.id || null) !== (payload.activeProjectId || null)) {
+throw new Error('پروژهٔ فعال از زمان پیش‌نمایش عوض شده؛ برای جلوگیری از تغییر فضای اشتباه، درخواست را دوباره بفرست.');
+}
+if (payload.workspaceFingerprint) {
+const ws = await getWorkspace(chatId, env);
+if (await projectFilesFingerprint(ws.files || []) !== payload.workspaceFingerprint) throw new Error('فایل‌های workspace از زمان preview تغییر کرده‌اند؛ هیچ تغییری اعمال نشد و باید دوباره درخواست بدهی.');
+}
+if (payload.githubTokenFingerprint) {
+const token = await getGithubToken(userId, env);
+if (!token || await textFingerprint(token) !== payload.githubTokenFingerprint) {
+throw new Error('اتصال GitHub از زمان پیش‌نمایش عوض شده؛ درخواست را دوباره بفرست.');
+}
+}
+let cloudflareToken;
+if (payload.cloudflareTokenFingerprint) {
+cloudflareToken = await getCloudflareToken(userId, env);
+if (!cloudflareToken || await textFingerprint(cloudflareToken) !== payload.cloudflareTokenFingerprint) throw new Error('اتصال Cloudflare از زمان preview عوض شده؛ درخواست را دوباره بفرست.');
+}
+if (payload.cloudflareRecordFingerprint) {
+const args = payload.args || {};
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const recordId = validateCloudflareId(args.record_id, 'record_id');
+const current = await cloudflareApiRequest(cloudflareToken, 'GET', `/zones/${zoneId}/dns_records/${recordId}`);
+const fingerprint = await textFingerprint(JSON.stringify(cloudflareSafeRecord(current.result || {})));
+if (fingerprint !== payload.cloudflareRecordFingerprint) throw new Error('رکورد DNS از زمان preview تغییر کرده؛ هیچ تغییری اعمال نشد. دوباره preview بگیر.');
+}
+return await executeTool(payload.toolName, payload.args || {}, { env, chatId, userId, token: undefined, cloudflareToken, login: null });
+}
+if (kind === 'workspace_clear') {
+const activeProject = await getActiveProject(chatId, env);
+if ((activeProject?.id || null) !== (payload.projectId || null)) throw new Error('پروژهٔ فعال عوض شده؛ هیچ workspaceای پاک نشد.');
+const ws = await getWorkspace(chatId, env);
+if (await projectFilesFingerprint(ws.files || []) !== payload.workspaceFingerprint) throw new Error('محتوای workspace از زمان preview تغییر کرده؛ هیچ فایلی پاک نشد و باید دوباره درخواست بدهی.');
+await env.STATS.delete(wsKey(chatId, payload.projectId || null));
+return { ok: true, workspace: payload.workspaceName || 'فضای کار پیش‌فرض' };
+}
+if (kind === 'project_delete') {
+const result = await deleteProjectById(chatId, payload.projectId, env);
+if (!result.ok) throw new Error(result.message);
+return result;
+}
+if (kind === 'project_push') {
+const project = await getActiveProject(chatId, env);
+const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
+if (!project || project.id !== payload.projectId || !linked || linked.repo !== payload.repo || linked.branch !== payload.branch) throw new Error('پروژه یا مقصد GitHub از زمان preview عوض شده؛ دوباره پیش‌نمایش بگیر.');
+const ws = await getWorkspace(chatId, env);
+const files = projectSyncFiles(ws);
+if (!files.length || await projectFilesFingerprint(files) !== payload.fingerprint) throw new Error('فایل‌های workspace از زمان preview تغییر کرده‌اند؛ دوباره پیش‌نمایش بگیر.');
+const token = await getGithubToken(userId, env);
+if (!token || await textFingerprint(token) !== payload.githubTokenFingerprint) throw new Error('اتصال GitHub از زمان preview تغییر کرده؛ دوباره آن را بررسی کن.');
+const result = await githubPushFiles(token, linked.repo, {
+branch: linked.branch,
+message: `Sync project ${project.name}`,
+files: files.map(f => ({ path: cleanRepoPath(f.path), text: f.text, b64: f.b64 }))
+});
+return { ok: true, message: `ارسال کامل شد: ${result.files_pushed || files.length} فایل به ${linked.repo}@${linked.branch}.`, ...result };
+}
+if (kind === 'project_pull_overwrite') {
+const project = await getActiveProject(chatId, env);
+const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
+if (!project || project.id !== payload.projectId || !linked || linked.repo !== payload.repo || linked.branch !== payload.branch) {
+throw new Error('پروژه یا مخزن از زمان پیش‌نمایش عوض شده؛ درخواست را دوباره بفرست.');
+}
+const ws = await getWorkspace(chatId, env);
+if (await projectFilesFingerprint(ws.files || []) !== payload.workspaceFingerprint) throw new Error('فایل‌های workspace از زمان پیش‌نمایش تغییر کرده‌اند؛ درخواست را دوباره بفرست.');
+const ok = await pullProjectRepo(chatId, userId, env, true, payload.treeSha, payload.workspaceFingerprint);
+if (!ok) throw new Error('دریافت overwrite کامل نشد؛ جزئیات در پیام منوی GitHub آمده است.');
+return { reportedToChat: true };
+}
+throw new Error('نوع عملیات تأیید ناشناخته است؛ تغییری انجام نشد.');
+}
+
+async function textFingerprint(value) {
+const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)));
+return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function handleCallbackQuery(cb, env) {
 try { await answerCallbackQuery(cb.id, env); } catch (e) {}
 const chatId = cb.message?.chat?.id;
@@ -747,6 +970,10 @@ const userId = cb.from?.id;
 const data = cb.data || '';
 if (!chatId || !userId) return;
 try {
+if (data.startsWith('action:')) {
+await handleActionConfirmationCallback(cb, env);
+return;
+}
 if (data.startsWith('project:')) {
 await handleProjectCallbackQuery(chatId, userId, data, env);
 return;
@@ -980,6 +1207,38 @@ content TEXT NOT NULL,
 created_at INTEGER NOT NULL
 )`).run();
 await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_project_hist_scope ON project_chat_history (chat_id, project_id, id)').run();
+await env.DB.prepare(`CREATE TABLE IF NOT EXISTS action_approvals (
+id TEXT PRIMARY KEY,
+chat_id TEXT NOT NULL,
+user_id TEXT NOT NULL,
+kind TEXT NOT NULL,
+payload_key TEXT NOT NULL,
+status TEXT NOT NULL,
+created_at INTEGER NOT NULL,
+expires_at INTEGER NOT NULL,
+resolved_at INTEGER
+)`).run();
+await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_action_approvals_owner ON action_approvals (user_id, chat_id, status, expires_at)').run();
+await env.DB.prepare(`CREATE TABLE IF NOT EXISTS user_integrations (
+user_id TEXT NOT NULL,
+provider TEXT NOT NULL,
+ciphertext TEXT NOT NULL,
+iv TEXT NOT NULL,
+key_version INTEGER NOT NULL DEFAULT 1,
+metadata_json TEXT NOT NULL DEFAULT '{}',
+created_at INTEGER NOT NULL,
+updated_at INTEGER NOT NULL,
+PRIMARY KEY (user_id, provider)
+)`).run();
+await env.DB.prepare(`CREATE TABLE IF NOT EXISTS cloudflare_connect_sessions (
+state_hash TEXT PRIMARY KEY,
+user_id TEXT NOT NULL,
+chat_id TEXT NOT NULL,
+status TEXT NOT NULL,
+expires_at INTEGER NOT NULL,
+created_at INTEGER NOT NULL
+)`).run();
+await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_cf_connect_expiry ON cloudflare_connect_sessions (status, expires_at)').run();
 schemaReady = true;
 }
 
@@ -1184,16 +1443,17 @@ function projectSyncFiles(workspace) {
 return (workspace?.files || []).filter(file => isSafeProjectFilePath(file.path) && !ZIP_SECRET_FILES.test(file.path));
 }
 
-async function pullProjectRepo(chatId, userId, env, overwrite = false) {
+async function pullProjectRepo(chatId, userId, env, overwrite = false, expectedTreeSha = null, expectedWorkspaceFingerprint = null) {
 const project = await getActiveProject(chatId, env);
-if (!project) { await sendProjectGithubMenu(chatId, userId, env, 'پروژه‌ای فعال نیست.'); return; }
+if (!project) { await sendProjectGithubMenu(chatId, userId, env, 'پروژه‌ای فعال نیست.'); return false; }
 const linked = await getProjectRepo(chatId, project.id, env);
 const token = await getGithubToken(userId, env);
-if (!linked) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا مخزن را به پروژه وصل کن.'); return; }
-if (!token) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا با /github توکن وصل کن.'); return; }
+if (!linked) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا مخزن را به پروژه وصل کن.'); return false; }
+if (!token) { await sendProjectGithubMenu(chatId, userId, env, 'ابتدا با /github توکن وصل کن.'); return false; }
 try {
 const treeResult = await ghRequest(token, 'GET', `/repos/${linked.repo}/git/trees/${encodePath(linked.branch)}?recursive=1`);
 if (treeResult.data.truncated) throw new Error('درخت مخزن از حد GitHub بزرگ‌تر است؛ برای جلوگیری از دریافت ناقص، سینک متوقف شد.');
+if (expectedTreeSha && treeResult.data.sha !== expectedTreeSha) throw new Error('شاخهٔ GitHub از زمان پیش‌نمایش تغییر کرده؛ دوباره preview بگیر.');
 const candidates = [];
 let plannedBytes = 0, skipped = 0;
 for (const entry of treeResult.data.tree || []) {
@@ -1203,6 +1463,7 @@ candidates.push(entry);
 plannedBytes += entry.size || 0;
 }
 const existing = await getWorkspace(chatId, env);
+if (expectedWorkspaceFingerprint && await projectFilesFingerprint(existing.files || []) !== expectedWorkspaceFingerprint) throw new Error('فایل‌های workspace از زمان پیش‌نمایش تغییر کرده‌اند؛ دوباره preview بگیر.');
 const existingPaths = new Set((existing.files || []).map(f => cleanRepoPath(f.path)));
 const toDownload = candidates.filter(entry => overwrite || !existingPaths.has(entry.path));
 const conflicts = candidates.length - toDownload.length;
@@ -1227,8 +1488,10 @@ const report = `⬇️ دریافت از ${linked.repo}@${linked.branch} تما�
 (conflicts ? ` ${conflicts} فایل هم‌نام حفظ شد${overwrite ? '' : ' (برای جایگزینی صریح، /project pull overwrite را اجرا کن)'}.` : '') +
 (skipped ? ` ${skipped} فایل به‌خاطر نوع/حجم/محدودیت کنار گذاشته شد.` : '');
 await sendProjectGithubMenu(chatId, userId, env, report);
+return true;
 } catch (e) {
 await sendProjectGithubMenu(chatId, userId, env, `❌ دریافت مخزن ناموفق بود: ${e.message}`);
+return false;
 }
 }
 
@@ -1236,6 +1499,45 @@ async function projectFilesFingerprint(files) {
 const source = JSON.stringify(files.map(f => [f.path, f.size, f.text ?? null, f.b64 ?? null]));
 const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
 return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function startProjectOverwritePull(chatId, userId, env) {
+const project = await getActiveProject(chatId, env);
+const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
+const token = await getGithubToken(userId, env);
+if (!project || !linked || !token) {
+await sendProjectGithubMenu(chatId, userId, env, !project ? 'پروژه‌ای فعال نیست.' : !linked ? 'ابتدا مخزن را به پروژه وصل کن.' : 'ابتدا با /github توکن وصل کن.');
+return;
+}
+try {
+const treeResult = await ghRequest(token, 'GET', `/repos/${linked.repo}/git/trees/${encodePath(linked.branch)}?recursive=1`);
+if (treeResult.data.truncated) throw new Error('درخت مخزن از حد GitHub بزرگ‌تر است؛ preview کامل ممکن نیست.');
+const candidates = [];
+let plannedBytes = 0;
+for (const entry of treeResult.data.tree || []) {
+if (entry.type !== 'blob' || !isSafeProjectFilePath(entry.path)) continue;
+if ((entry.size || 0) > 2 * 1024 * 1024 || candidates.length >= 200 || plannedBytes + (entry.size || 0) > 10 * 1024 * 1024) continue;
+candidates.push(entry);
+plannedBytes += entry.size || 0;
+}
+const ws = await getWorkspace(chatId, env);
+const localPaths = new Set((ws.files || []).map(f => cleanRepoPath(f.path)));
+const conflicts = candidates.filter(f => localPaths.has(f.path)).map(f => f.path);
+const workspaceFingerprint = await projectFilesFingerprint(ws.files || []);
+if (!conflicts.length) {
+await pullProjectRepo(chatId, userId, env, true, treeResult.data.sha, workspaceFingerprint);
+return;
+}
+const listed = conflicts.slice(0, 15).map(p => `• ${p}`).join('\n');
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'project_pull_overwrite',
+payload: { projectId: project.id, repo: linked.repo, branch: linked.branch, treeSha: treeResult.data.sha, workspaceFingerprint },
+title: 'جایگزینی فایل‌های محلی با نسخهٔ مخزن',
+details: `پروژه: ${project.name}\nمخزن: ${linked.repo}@${linked.branch}\nفایل‌های هم‌نامی که جایگزین می‌شوند: ${conflicts.length}\n${listed}${conflicts.length > 15 ? `\n… و ${conflicts.length - 15} فایل دیگر` : ''}\n\nاگر فایل‌های workspace یا شاخهٔ GitHub قبل از تأیید تغییر کنند، عملیات متوقف می‌شود.`
+});
+} catch (error) {
+await sendProjectGithubMenu(chatId, userId, env, `❌ ساخت پیش‌نمایش overwrite ناموفق بود: ${error.message}`);
+}
 }
 
 async function startProjectPush(chatId, userId, env) {
@@ -1250,13 +1552,13 @@ const files = projectSyncFiles(ws);
 if (!files.length) { await sendProjectGithubMenu(chatId, userId, env, 'فایل امنی در workspace پروژه برای ارسال نیست.'); return; }
 if (files.length > 300) { await sendProjectGithubMenu(chatId, userId, env, 'تعداد فایل‌ها بیش از حد مجاز برای یک sync است (حداکثر ۳۰۰).'); return; }
 const fingerprint = await projectFilesFingerprint(files);
-await env.STATS.put(projectPushPlanKey(chatId), JSON.stringify({ projectId: project.id, repo: linked.repo, branch: linked.branch, fingerprint }), { expirationTtl: 300 });
-const list = files.slice(0, 12).map(f => `• ${escapeHtml(f.path)}`).join('\n');
-await sendMessage(chatId,
-`⚠️ <b>تأیید ارسال به GitHub</b>\nمخزن: <code>${escapeHtml(linked.repo)}</code>\nبرنچ: <code>${escapeHtml(linked.branch)}</code>\nفایل‌ها: ${files.length}\n\n${list}${files.length > 12 ? `\n… و ${files.length - 12} فایل دیگر` : ''}\n\nفقط فایل‌های workspace اضافه/به‌روزرسانی می‌شوند؛ فایل‌های دیگر مخزن حذف نمی‌شوند. برای ادامه، تأیید کن.`,
-env,
-{ inline_keyboard: [[{ text: '✅ تأیید و ارسال', callback_data: 'project:push_confirm' }, { text: '❌ لغو', callback_data: 'project:push_cancel' }]] },
-'HTML');
+const list = files.slice(0, 12).map(f => `• ${f.path}`).join('\n');
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'project_push',
+payload: { projectId: project.id, repo: linked.repo, branch: linked.branch, fingerprint, githubTokenFingerprint: await textFingerprint(token), label: 'ارسال workspace به GitHub' },
+title: 'تأیید ارسال به GitHub',
+details: `پروژه: ${project.name}\nمخزن: ${linked.repo}@${linked.branch}\nفایل‌ها: ${files.length}\n${list}${files.length > 12 ? `\n… و ${files.length - 12} فایل دیگر` : ''}\n\nفقط فایل‌های workspace اضافه/به‌روزرسانی می‌شوند؛ فایل‌های دیگر مخزن حذف نمی‌شوند. مقصد، فایل‌ها و اتصال GitHub هنگام تأیید دوباره بررسی می‌شوند.`
+});
 }
 
 async function confirmProjectPush(chatId, userId, env) {
@@ -1264,6 +1566,11 @@ const raw = await env.STATS.get(projectPushPlanKey(chatId));
 if (!raw) { await sendProjectGithubMenu(chatId, userId, env, 'پیش‌نمایش منقضی شده؛ دوباره ارسال را شروع کن.'); return; }
 let plan;
 try { plan = JSON.parse(raw); } catch (e) { await env.STATS.delete(projectPushPlanKey(chatId)); await sendProjectGithubMenu(chatId, userId, env, 'پیش‌نمایش معتبر نیست؛ دوباره تلاش کن.'); return; }
+if (!plan.userId || String(plan.userId) !== String(userId)) {
+if (!plan.userId) await env.STATS.delete(projectPushPlanKey(chatId));
+await sendMessage(chatId, 'این پیش‌نمایش قدیمی یا متعلق به کاربر دیگری است؛ push را دوباره از منوی پروژه شروع کن.', env);
+return;
+}
 const project = await getActiveProject(chatId, env);
 const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
 if (!project || project.id !== plan.projectId || !linked || linked.repo !== plan.repo || linked.branch !== plan.branch) {
@@ -1308,6 +1615,20 @@ projects.push(project);
 await env.STATS.put(projectsKey(chatId), JSON.stringify(projects));
 await env.STATS.put(activeProjectKey(chatId), project.id);
 return { ok: true, project, message: `✅ پروژهٔ «${cleanName}» ساخته و فعال شد.` };
+}
+
+async function deleteProjectById(chatId, projectId, env) {
+const projects = await getProjects(chatId, env);
+const project = projects.find(p => p.id === projectId);
+if (!project) return { ok: false, message: 'این پروژه دیگر وجود ندارد؛ هیچ داده‌ای حذف نشد.' };
+const active = await getActiveProject(chatId, env);
+await env.STATS.delete(wsKey(chatId, project.id));
+await env.STATS.delete(projectRepoKey(chatId, project.id));
+await ensureSchema(env);
+await env.DB.prepare('DELETE FROM project_chat_history WHERE chat_id = ? AND project_id = ?').bind(chatId, project.id).run();
+await env.STATS.put(projectsKey(chatId), JSON.stringify(projects.filter(p => p.id !== project.id)));
+if (active?.id === project.id) await env.STATS.delete(activeProjectKey(chatId));
+return { ok: true, name: project.name };
 }
 
 async function startProjectCreateFlow(chatId, env) {
@@ -1378,7 +1699,11 @@ await sendProjectGithubMenu(chatId, userId, env, result.message);
 return;
 }
 if (action === 'sync') { await sendProjectGithubMenu(chatId, userId, env); return; }
-if (action === 'pull') { await pullProjectRepo(chatId, userId, env, (args[1] || '').toLowerCase() === 'overwrite'); return; }
+if (action === 'pull') {
+if ((args[1] || '').toLowerCase() === 'overwrite') await startProjectOverwritePull(chatId, userId, env);
+else await pullProjectRepo(chatId, userId, env, false);
+return;
+}
 if (action === 'push') { await startProjectPush(chatId, userId, env); return; }
 if (action === 'use' || action === 'switch') {
 const projects = await getProjects(chatId, env);
@@ -1398,12 +1723,12 @@ const projects = await getProjects(chatId, env);
 const active = await getActiveProject(chatId, env);
 const project = projects.find(p => normalizeProjectName(p.name) === normalizeProjectName(name));
 if (!project) { await sendProjectMenu(chatId, env, 'این پروژه پیدا نشد.'); return; }
-await env.STATS.delete(`ws:${chatId}:project:${project.id}`);
-await ensureSchema(env);
-await env.DB.prepare('DELETE FROM project_chat_history WHERE chat_id = ? AND project_id = ?').bind(chatId, project.id).run();
-await env.STATS.put(projectsKey(chatId), JSON.stringify(projects.filter(p => p.id !== project.id)));
-if (active?.id === project.id) await env.STATS.delete(activeProjectKey(chatId));
-await sendProjectMenu(chatId, env, `🗑 پروژهٔ «${project.name}» و داده‌های اختصاصی‌اش حذف شد.`);
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'project_delete',
+payload: { projectId: project.id, label: `حذف پروژهٔ ${project.name}` },
+title: `حذف پروژهٔ «${project.name}»`,
+details: `فضای کار، تاریخچهٔ گفتگو و اتصال مخزن این پروژه حذف می‌شود. این کار قابل بازگشت نیست.${active?.id === project.id ? '\nاین پروژه در حال حاضر فعال است و پس از حذف به حالت پیش‌فرض برمی‌گردی.' : ''}`
+});
 return;
 }
 await sendProjectMenu(chatId, env, 'دستور پروژه را نشناختم.');
@@ -1411,7 +1736,7 @@ await sendProjectMenu(chatId, env, 'دستور پروژه را نشناختم.')
 
 // =============== مدیریت پیام‌های تلگرام ===============
 
-const TELEGRAM_COMMANDS_VERSION = '2026-11-09-v1';
+const TELEGRAM_COMMANDS_VERSION = '2026-11-09-v2';
 const TELEGRAM_COMMANDS = [
 { command: 'start', description: 'شروع ربات و نمایش منوی اصلی' },
 { command: 'help', description: 'راهنما و فهرست قابلیت‌های ربات' },
@@ -1421,6 +1746,7 @@ const TELEGRAM_COMMANDS = [
 { command: 'project', description: 'مدیریت پروژه‌ها، workspace و GitHub' },
 { command: 'github', description: 'اتصال یا بررسی اتصال GitHub' },
 { command: 'github_off', description: 'حذف توکن GitHub' },
+{ command: 'cloudflare', description: 'اتصال امن و مدیریت Cloudflare' },
 { command: 'workspace', description: 'نمایش فایل‌های فضای کار فعال' },
 { command: 'workspace_clear', description: 'پاک‌کردن فضای کار فعال' },
 { command: 'lang', description: 'تنظیم زبان پیش‌فرض' },
@@ -1451,7 +1777,7 @@ console.error('Telegram command menu registration failed:', error?.message || er
 }
 }
 
-async function handleUpdate(update, env) {
+async function handleUpdate(update, env, publicOrigin = '') {
 await ensureTelegramCommands(env);
 // دکمه‌های شیشه‌ای (inline) — منوی هوش مصنوعی شخصی
 if (update.callback_query) {
@@ -1482,7 +1808,7 @@ await incrementStat('total_files', env);
 await handleDocument(chatId, document, caption, env, userId);
 await incrementStat('total_files', env);
 } else if (text.startsWith('/')) {
-await handleCommand(chatId, userId, text, env, messageId);
+await handleCommand(chatId, userId, text, env, messageId, publicOrigin);
 } else if (await handleProjectFlowInput(chatId, userId, text, env)) {
 // نام پروژه در جریان ساخت با دکمه دریافت شد
 } else if (looksLikeGithubToken(text)) {
@@ -1502,7 +1828,7 @@ await sendMessage(chatId, `❌ خطا: ${error.message}`, env);
 }
 
 // دستورات
-async function handleCommand(chatId, userId, text, env, messageId) {
+async function handleCommand(chatId, userId, text, env, messageId, publicOrigin = '') {
 const parts = text.trim().split(/\s+/);
 const command = parts[0].toLowerCase().split('@')[0];
 const args = parts.slice(1);
@@ -1559,6 +1885,9 @@ let help = '📋 راهنما:\n\n' +
 '/github <توکن> - وصل کردن گیت‌هاب (پیام توکن خودکار پاک می‌شود)\n' +
 '/github - وضعیت اتصال\n' +
 '/github_off - حذف توکن\n' +
+'/cloudflare - اتصال امن، وضعیت یا مدیریت حساب Cloudflare\n' +
+'• اتصال Cloudflare در چت خصوصی با فرم HTTPS انجام می‌شود؛ توکن را داخل تلگرام نفرست.\n' +
+'/cloudflare off - قطع اتصال و حذف توکن رمزگذاری‌شده\n' +
 '/workspace - فایل‌های آماده برای پوش\n' +
 '/workspace_clear - خالی کردن فضای کار\n' +
 'بعد از وصل شدن، کافیه طبیعی بگی؛ مثلاً: «این ZIP رو تو یه ریپو خصوصی جدید به اسم my-app پوش کن»';
@@ -1630,6 +1959,29 @@ await sendMessage(chatId, 'توکن گیت‌هاب پاک شد.', env);
 break;
 }
 
+case '/cloudflare': {
+if (String(chatId) !== String(userId)) {
+await sendMessage(chatId, 'برای امنیت، اتصال یا مدیریت Cloudflare را فقط در گفت‌وگوی خصوصی با ربات انجام بده.', env);
+break;
+}
+const action = (args[0] || '').toLowerCase();
+if (['off', 'disconnect', 'remove', 'حذف'].includes(action)) {
+await deleteCloudflareCredential(userId, env);
+await sendMessage(chatId, 'اتصال Cloudflare حذف شد؛ توکن ذخیره‌شده دیگر قابل استفاده نیست.', env);
+} else if (action === 'status') {
+const meta = await getCloudflareCredentialMeta(userId, env);
+await sendMessage(chatId, meta ? `Cloudflare وصله. شناسهٔ token: ${meta.tokenId || 'نامشخص'}${meta.expiresOn ? `\nانقضا: ${meta.expiresOn}` : ''}\nبرای قطع اتصال: /cloudflare off` : 'Cloudflare هنوز وصل نیست. برای اتصال امن: /cloudflare connect', env);
+} else if (action === 'connect') {
+await startCloudflareConnect(chatId, userId, env, publicOrigin);
+} else if (await getCloudflareCredentialMeta(userId, env)) {
+const meta = await getCloudflareCredentialMeta(userId, env);
+await sendMessage(chatId, `Cloudflare وصله. شناسهٔ token: ${meta?.tokenId || 'نامشخص'}\nبرای اتصال دوباره: /cloudflare connect\nبرای قطع اتصال: /cloudflare off`, env);
+} else {
+await startCloudflareConnect(chatId, userId, env, publicOrigin);
+}
+break;
+}
+
 case '/workspace': {
 const ws = await getWorkspace(chatId, env);
 if (!ws.files.length) {
@@ -1644,8 +1996,17 @@ break;
 
 case '/workspace_clear': {
 const project = await getActiveProject(chatId, env);
-await env.STATS.delete(wsKey(chatId, project?.id || null));
-await sendMessage(chatId, 'فضای کار خالی شد.', env);
+const ws = await getWorkspace(chatId, env);
+if (!ws.files.length) {
+await sendMessage(chatId, 'فضای کار از قبل خالی است.', env);
+break;
+}
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'workspace_clear',
+payload: { projectId: project?.id || null, workspaceName: project?.name || ws.name || 'فضای کار پیش‌فرض', workspaceFingerprint: await projectFilesFingerprint(ws.files || []), label: 'پاک‌کردن فضای کار' },
+title: 'پاک‌کردن فضای کار فعال',
+details: `فضا: ${project?.name || ws.name || 'پیش‌فرض'} | فایل‌ها: ${ws.files.length}\nتمام فایل‌های این workspace حذف می‌شوند و قابل بازگشت نیستند.`
+});
 break;
 }
 
@@ -2115,6 +2476,198 @@ if (!userId) return null;
 return await env.STATS.get(ghTokenKey(userId));
 }
 
+// ---------- اتصال Cloudflare: token فقط از فرم HTTPS دریافت و در D1 رمز می‌شود ----------
+const CLOUDFLARE_CONNECT_TTL_SECONDS = 10 * 60;
+const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4';
+
+function cfB64(bytes) {
+let binary = '';
+for (const b of bytes) binary += String.fromCharCode(b);
+return btoa(binary);
+}
+function cfUnb64(value) {
+const binary = atob(value);
+return Uint8Array.from(binary, c => c.charCodeAt(0));
+}
+function cfB64Url(bytes) { return cfB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); }
+function cfFromB64Url(value) { return cfUnb64(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)); }
+
+async function cloudflareCryptoKey(env) {
+if (!env.CLOUDFLARE_ENCRYPTION_KEY) throw new Error('اتصال Cloudflare هنوز آماده نیست؛ secret به نام CLOUDFLARE_ENCRYPTION_KEY در تنظیمات Worker تعریف نشده است.');
+let raw;
+try { raw = cfUnb64(String(env.CLOUDFLARE_ENCRYPTION_KEY).trim()); } catch { throw new Error('CLOUDFLARE_ENCRYPTION_KEY باید Base64 معتبرِ ۳۲ بایتی باشد.'); }
+if (raw.length !== 32) throw new Error('CLOUDFLARE_ENCRYPTION_KEY باید Base64 معتبرِ ۳۲ بایتی باشد.');
+return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+function cloudflareAAD(userId) { return new TextEncoder().encode(`telegram-code-assistant:cloudflare:v1:${String(userId)}`); }
+async function encryptCloudflareToken(token, userId, env) {
+const key = await cloudflareCryptoKey(env);
+const iv = crypto.getRandomValues(new Uint8Array(12));
+const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: cloudflareAAD(userId) }, key, new TextEncoder().encode(token));
+return { iv: cfB64(iv), ciphertext: cfB64(new Uint8Array(cipher)) };
+}
+async function decryptCloudflareToken(ciphertext, ivValue, userId, env) {
+const key = await cloudflareCryptoKey(env);
+const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: cfUnb64(ivValue), additionalData: cloudflareAAD(userId) }, key, cfUnb64(ciphertext));
+return new TextDecoder().decode(raw);
+}
+
+async function cloudflareApiRequest(token, method, path, body) {
+if (!path.startsWith('/') || path.startsWith('//')) throw new Error('مسیر Cloudflare API نامعتبر است.');
+const response = await fetch(`${CLOUDFLARE_API_BASE}${path}`, {
+method,
+headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+body: body ? JSON.stringify(body) : undefined
+});
+const raw = await response.text();
+let data;
+try { data = raw ? JSON.parse(raw) : {}; } catch { data = {}; }
+if (!response.ok || data.success === false) {
+const detail = (data.errors || []).map(x => x.message || x.code).filter(Boolean).join('; ');
+const error = new Error(`Cloudflare ${response.status}: ${detail || `درخواست ناموفق بود (HTTP ${response.status})`}`);
+error.status = response.status;
+throw error;
+}
+return data;
+}
+
+async function verifyCloudflareToken(token) {
+const data = await cloudflareApiRequest(token, 'GET', '/user/tokens/verify');
+if (data.result?.status !== 'active') throw new Error('این Cloudflare API Token فعال نیست.');
+return { tokenId: String(data.result?.id || ''), expiresOn: data.result?.expires_on || null };
+}
+
+async function getCloudflareCredentialMeta(userId, env) {
+await ensureSchema(env);
+const row = await env.DB.prepare("SELECT metadata_json FROM user_integrations WHERE user_id = ? AND provider = 'cloudflare'").bind(String(userId)).first();
+if (!row) return null;
+try { return JSON.parse(row.metadata_json || '{}'); } catch { return {}; }
+}
+
+async function getCloudflareToken(userId, env) {
+if (!userId) return null;
+await ensureSchema(env);
+const row = await env.DB.prepare("SELECT ciphertext, iv FROM user_integrations WHERE user_id = ? AND provider = 'cloudflare'").bind(String(userId)).first();
+if (!row) return null;
+try { return await decryptCloudflareToken(row.ciphertext, row.iv, userId, env); }
+catch (error) { console.error('Cloudflare credential decrypt failed:', error?.message || error); throw new Error('توکن Cloudflare قابل رمزگشایی نیست؛ کلید رمزگذاری Worker تغییر کرده یا تنظیم نشده است.'); }
+}
+
+async function storeCloudflareCredential(userId, encrypted, metadata, env) {
+await ensureSchema(env);
+const now = Math.floor(Date.now() / 1000);
+await env.DB.prepare(`INSERT INTO user_integrations
+(user_id, provider, ciphertext, iv, key_version, metadata_json, created_at, updated_at)
+VALUES (?, 'cloudflare', ?, ?, 1, ?, ?, ?)
+ON CONFLICT(user_id, provider) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv,
+key_version = 1, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`)
+.bind(String(userId), encrypted.ciphertext, encrypted.iv, JSON.stringify(metadata || {}), now, now).run();
+}
+
+async function deleteCloudflareCredential(userId, env) {
+await ensureSchema(env);
+await env.DB.prepare("DELETE FROM user_integrations WHERE user_id = ? AND provider = 'cloudflare'").bind(String(userId)).run();
+}
+
+function cloudflareHtmlPage(title, body, status = 200) {
+const html = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font:16px system-ui,sans-serif;background:#101827;color:#e8edf5;margin:0;padding:24px}main{max-width:560px;margin:7vh auto;background:#1d293b;border:1px solid #34435b;border-radius:16px;padding:24px}h1{font-size:1.35rem}p{line-height:1.8;color:#cbd5e1}label{display:block;margin:20px 0 8px}input{box-sizing:border-box;width:100%;padding:14px;border-radius:10px;border:1px solid #52617a;background:#111b2b;color:#fff;font-size:16px}button{width:100%;padding:14px;border:0;border-radius:10px;background:#f48120;color:#111;font-weight:700;font-size:16px;margin-top:16px}.notice{font-size:14px;color:#fcd9ad}</style><main><h1>${escapeHtml(title)}</h1>${body}</main></html>`;
+return new Response(html, { status, headers: {
+'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache',
+'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
+'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+} });
+}
+
+async function startCloudflareConnect(chatId, userId, env, publicOrigin) {
+if (!env.CLOUDFLARE_ENCRYPTION_KEY) {
+await sendMessage(chatId, 'اتصال Cloudflare هنوز آماده نیست. مدیر باید secret به نام CLOUDFLARE_ENCRYPTION_KEY را روی Worker تنظیم کند؛ مقدار آن را به ربات یا چت نفرست.', env);
+return;
+}
+if (!publicOrigin || !/^https:\/\//i.test(publicOrigin)) {
+await sendMessage(chatId, 'آدرس امن Worker در دسترس نیست؛ دوباره از چت خصوصی /cloudflare را بزن.', env);
+return;
+}
+await ensureSchema(env);
+const state = cfB64Url(crypto.getRandomValues(new Uint8Array(32)));
+const stateHash = await textFingerprint(state);
+const now = Math.floor(Date.now() / 1000);
+await env.DB.prepare("DELETE FROM cloudflare_connect_sessions WHERE expires_at < ? OR status != 'pending'").bind(now - 86400).run();
+await env.DB.prepare("UPDATE cloudflare_connect_sessions SET status = 'revoked' WHERE user_id = ? AND status = 'pending'").bind(String(userId)).run();
+await env.DB.prepare(`INSERT INTO cloudflare_connect_sessions (state_hash, user_id, chat_id, status, expires_at, created_at)
+VALUES (?, ?, ?, 'pending', ?, ?)`).bind(stateHash, String(userId), String(chatId), now + CLOUDFLARE_CONNECT_TTL_SECONDS, now).run();
+const link = new URL('/connect/cloudflare', publicOrigin);
+link.searchParams.set('state', state);
+await sendMessage(chatId,
+'برای امنیت، توکن را در تلگرام نفرست. لینک زیر ۱۰ دقیقه و فقط یک‌بار معتبر است؛ در صفحهٔ HTTPS توکن را وارد کن، بعد از برگشت به تلگرام اتصال را تأیید کن. یک API Token با دسترسی محدود بساز و رمز Global API Key را وارد نکن.',
+env, { inline_keyboard: [[{ text: '🔐 اتصال امن Cloudflare', url: link.toString() }]] });
+}
+
+async function handleCloudflareConnectPage(request, env) {
+if (!env.DB || !env.CLOUDFLARE_ENCRYPTION_KEY) return cloudflareHtmlPage('اتصال Cloudflare آماده نیست', '<p>پیکربندی امن اتصال روی Worker کامل نشده است.</p>', 503);
+await ensureSchema(env);
+if (request.method === 'GET') {
+const state = new URL(request.url).searchParams.get('state') || '';
+if (!/^[A-Za-z0-9_-]{40,60}$/.test(state)) return cloudflareHtmlPage('لینک نامعتبر', '<p>این لینک اتصال معتبر نیست؛ در چت خصوصی /cloudflare را دوباره بزن.</p>', 400);
+const stateHash = await textFingerprint(state);
+const row = await env.DB.prepare("SELECT status, expires_at FROM cloudflare_connect_sessions WHERE state_hash = ?").bind(stateHash).first();
+if (!row || row.status !== 'pending' || row.expires_at <= Math.floor(Date.now() / 1000)) return cloudflareHtmlPage('لینک منقضی شده', '<p>این لینک منقضی یا استفاده شده است. در تلگرام /cloudflare را دوباره بزن.</p>', 410);
+return cloudflareHtmlPage('اتصال امن Cloudflare', `<p>API Token محدود Cloudflare را وارد کن. این صفحه از HTTPS استفاده می‌کند؛ توکن در پیام تلگرام یا URL قرار نمی‌گیرد.</p><p class="notice">برای مشاهدهٔ Zoneها: <b>Zone: Zone Read</b>. برای خواندن DNS: <b>DNS: DNS Read</b>. برای تغییر DNS: <b>DNS: DNS Write</b>. برای فهرست Workerها: <b>Workers Scripts Read</b>. محدودهٔ دسترسی را فقط به Zone/Account لازم محدود کن.</p><form method="post" action="/connect/cloudflare"><input type="hidden" name="state" value="${escapeHtml(state)}"><label for="token">Cloudflare API Token</label><input id="token" name="token" type="password" autocomplete="off" minlength="20" maxlength="512" required><button type="submit">اعتبارسنجی توکن</button></form>`);
+}
+
+const contentLength = Number(request.headers.get('Content-Length') || 0);
+if (contentLength > 4096) return cloudflareHtmlPage('درخواست نامعتبر', '<p>درخواست بیش از حد بزرگ است.</p>', 413);
+const reader = request.body?.getReader();
+const chunks = [];
+let totalBytes = 0;
+if (reader) {
+while (true) {
+const { value, done } = await reader.read();
+if (done) break;
+totalBytes += value.byteLength;
+if (totalBytes > 4096) {
+await reader.cancel();
+return cloudflareHtmlPage('درخواست نامعتبر', '<p>درخواست بیش از حد بزرگ است.</p>', 413);
+}
+chunks.push(value);
+}
+}
+const joined = new Uint8Array(totalBytes);
+let offset = 0;
+for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+const body = new TextDecoder().decode(joined);
+const form = new URLSearchParams(body);
+const state = form.get('state') || '';
+const token = (form.get('token') || '').trim();
+if (!/^[A-Za-z0-9_-]{40,60}$/.test(state) || token.length < 20 || token.length > 512 || /[\u0000-\u0020\u007f]/.test(token)) {
+return cloudflareHtmlPage('ورودی نامعتبر', '<p>توکن یا لینک معتبر نیست؛ در تلگرام اتصال را دوباره شروع کن.</p>', 400);
+}
+const stateHash = await textFingerprint(state);
+const now = Math.floor(Date.now() / 1000);
+const session = await env.DB.prepare("SELECT user_id, chat_id, status, expires_at FROM cloudflare_connect_sessions WHERE state_hash = ?").bind(stateHash).first();
+if (!session || session.status !== 'pending' || session.expires_at <= now || String(session.user_id) !== String(session.chat_id)) {
+return cloudflareHtmlPage('لینک منقضی شده', '<p>لینک معتبر نیست یا منقضی شده. در چت خصوصی /cloudflare را دوباره بزن.</p>', 410);
+}
+const claimed = await env.DB.prepare(`UPDATE cloudflare_connect_sessions SET status = 'processing'
+WHERE state_hash = ? AND status = 'pending' AND expires_at > ?`).bind(stateHash, now).run();
+if (!claimed.meta?.changes) return cloudflareHtmlPage('لینک استفاده شده', '<p>این لینک قبلاً مصرف شده؛ در تلگرام اتصال را دوباره شروع کن.</p>', 409);
+try {
+const metadata = await verifyCloudflareToken(token);
+const encrypted = await encryptCloudflareToken(token, session.user_id, env);
+await requestActionConfirmation(session.chat_id, session.user_id, env, {
+kind: 'cloudflare_connect', payload: { encrypted, metadata },
+title: 'اتصال حساب Cloudflare',
+details: `توکن Cloudflare اعتبارسنجی شد. شناسه: ${metadata.tokenId || 'نامشخص'}${metadata.expiresOn ? `\nانقضا: ${metadata.expiresOn}` : ''}\nاگر همین الان خودت این توکن را در صفحهٔ امن وارد کردی، تأیید کن؛ در غیر این صورت لغو کن.`
+});
+await env.DB.prepare("UPDATE cloudflare_connect_sessions SET status = 'awaiting_confirmation' WHERE state_hash = ? AND status = 'processing'").bind(stateHash).run();
+return cloudflareHtmlPage('توکن اعتبارسنجی شد', '<p>توکن معتبر است. به گفت‌وگوی خصوصی تلگرام برگرد و دکمهٔ تأیید اتصال را بزن. توکن تا پایان این درخواست به‌صورت رمزگذاری‌شده نگه‌داری می‌شود.</p>');
+} catch (error) {
+await env.DB.prepare("UPDATE cloudflare_connect_sessions SET status = 'failed' WHERE state_hash = ? AND status = 'processing'").bind(stateHash).run();
+console.error('Cloudflare connect failed:', error?.message || error);
+return cloudflareHtmlPage('اتصال انجام نشد', `<p>${escapeHtml(String(error.message || 'اعتبارسنجی ناموفق بود').substring(0, 500))}</p><p>توکن در چت تلگرام ارسال نشده است. در تلگرام اتصال را دوباره شروع کن.</p>`, 400);
+}
+}
+
 async function deleteTelegramMessage(chatId, messageId, env) {
 if (!messageId) return false;
 try {
@@ -2465,6 +3018,37 @@ repo: { type: 'string' }, head: { type: 'string', description: 'برنچ تغی�
 base: { type: 'string', description: 'پیش‌فرض: برنچ پیش‌فرض' }, title: { type: 'string' }, body: { type: 'string' }
 }, required: ['repo', 'head', 'title'] } } },
 { type: 'function', function: {
+name: 'cloudflare_list_zones',
+description: 'فهرست Zoneهای Cloudflare که توکن دسترسی دارد؛ می‌تواند با نام دامنه فیلتر کند.',
+parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+{ type: 'function', function: {
+name: 'cloudflare_list_dns_records',
+description: 'فهرست DNS recordهای یک zone. zone_id را از cloudflare_list_zones بردار.',
+parameters: { type: 'object', properties: { zone_id: { type: 'string' }, name: { type: 'string' }, type: { type: 'string' } }, required: ['zone_id'] } } },
+{ type: 'function', function: {
+name: 'cloudflare_create_dns_record',
+description: 'ایجاد یک DNS record پس از preview و تأیید صریح کاربر. فقط A, AAAA, CNAME, TXT و MX پشتیبانی می‌شود.',
+parameters: { type: 'object', properties: {
+zone_id: { type: 'string' }, type: { type: 'string', enum: ['A', 'AAAA', 'CNAME', 'TXT', 'MX'] },
+name: { type: 'string' }, content: { type: 'string' }, ttl: { type: 'integer' }, proxied: { type: 'boolean' }, priority: { type: 'integer' }
+}, required: ['zone_id', 'type', 'name', 'content'] } } },
+{ type: 'function', function: {
+name: 'cloudflare_update_dns_record',
+description: 'تغییر محتوا، TTL یا حالت proxied یک DNS record مشخص. تغییر فقط پس از نمایش مقدار فعلی/جدید و تأیید انجام می‌شود.',
+parameters: { type: 'object', properties: { zone_id: { type: 'string' }, record_id: { type: 'string' }, content: { type: 'string' }, ttl: { type: 'integer' }, proxied: { type: 'boolean' } }, required: ['zone_id', 'record_id'] } } },
+{ type: 'function', function: {
+name: 'cloudflare_delete_dns_record',
+description: 'حذف دائمی DNS record مشخص. مقدار فعلی در preview نشان داده می‌شود و اجرا نیازمند تأیید است.',
+parameters: { type: 'object', properties: { zone_id: { type: 'string' }, record_id: { type: 'string' } }, required: ['zone_id', 'record_id'] } } },
+{ type: 'function', function: {
+name: 'cloudflare_list_workers',
+description: 'فهرست Worker scriptها در Cloudflare account مشخص؛ account_id را از داشبورد کاربر بگیر.',
+parameters: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } } },
+{ type: 'function', function: {
+name: 'cloudflare_get_worker',
+description: 'خواندن تنظیمات observability/logpush یک Worker، بدون دریافت source code یا secret values.',
+parameters: { type: 'object', properties: { account_id: { type: 'string' }, script_name: { type: 'string' } }, required: ['account_id', 'script_name'] } } },
+{ type: 'function', function: {
 name: 'workspace_list_files',
 description: 'فهرست فایل‌های فضای کار (فایل‌ها/ZIPهایی که کاربر در چت فرستاده).',
 parameters: { type: 'object', properties: {} } } },
@@ -2504,6 +3088,13 @@ case 'github_read_file': return `خواندن ${a.path || ''}`;
 case 'github_push': return `کامیت و پوش به ${a.repo || ''}${a.branch ? ` (${a.branch})` : ''}`;
 case 'github_create_branch': return `ساخت برنچ ${a.branch || ''}`;
 case 'github_create_pull_request': return `ساخت Pull Request`;
+case 'cloudflare_list_zones': return 'فهرست Zoneهای Cloudflare';
+case 'cloudflare_list_dns_records': return 'فهرست رکوردهای DNS';
+case 'cloudflare_create_dns_record': return `ساخت رکورد DNS ${a.type || ''} ${a.name || ''}`;
+case 'cloudflare_update_dns_record': return `ویرایش رکورد DNS ${a.record_id || ''}`;
+case 'cloudflare_delete_dns_record': return `حذف رکورد DNS ${a.record_id || ''}`;
+case 'cloudflare_list_workers': return `فهرست Workerهای اکانت ${a.account_id || ''}`;
+case 'cloudflare_get_worker': return `بررسی Worker ${a.script_name || ''}`;
 case 'workspace_list_files': return 'دیدن فایل‌های فضای کار';
 case 'workspace_read_file': return `خواندن ${a.path || ''}`;
 case 'workspace_write_file': return `نوشتن ${a.path || ''}`;
@@ -2514,9 +3105,108 @@ default: return name;
 }
 }
 
+async function buildAgentActionDetails(name, args, chatId, env) {
+const lines = [];
+if (name === 'cloudflare_create_dns_record') {
+lines.push(`Zone ID: ${args.zone_id || 'نامشخص'}`);
+lines.push(`عملیات: ایجاد ${args.type || 'نوع نامشخص'} — ${args.name || 'نامشخص'} → ${args.content || 'نامشخص'}`);
+lines.push(`TTL: ${args.ttl || 1} ثانیه (۱ یعنی خودکار) | Proxied: ${args.proxied === true ? 'بله' : 'خیر'}`);
+} else if (name === 'cloudflare_update_dns_record' || name === 'cloudflare_delete_dns_record') {
+lines.push(`Zone ID: ${args.zone_id || 'نامشخص'} | Record ID: ${args.record_id || 'نامشخص'}`);
+lines.push(name === 'cloudflare_delete_dns_record' ? 'عملیات: حذف دائمی رکورد DNS' : `عملیات: تغییر ${JSON.stringify({ content: args.content, ttl: args.ttl, proxied: args.proxied })}`);
+} else if (name === 'github_create_repo') {
+lines.push(`مخزن: ${args.org ? `${args.org}/` : ''}${args.name || 'نامشخص'}`);
+lines.push(`دسترسی: ${args.private === false ? 'عمومی' : 'خصوصی'}`);
+if (args.description) lines.push(`توضیح: ${String(args.description).substring(0, 300)}`);
+} else if (name === 'github_push') {
+lines.push(`مخزن: ${args.repo || 'نامشخص'} | شاخه: ${args.branch || 'شاخهٔ پیش‌فرض'}`);
+lines.push(`پیام کامیت: ${args.message || 'Update files'}`);
+const paths = (args.files || []).map(f => cleanRepoPath(f.path)).filter(Boolean);
+if (args.from_workspace || args.workspace_paths?.length) {
+const ws = await getWorkspace(chatId, env);
+const selected = args.workspace_paths?.length
+? ws.files.filter(f => args.workspace_paths.some(p => cleanRepoPath(p) === cleanRepoPath(f.path)))
+: ws.files;
+const dir = cleanRepoPath(args.target_dir || '').replace(/\/$/, '');
+for (const f of selected) paths.push(dir ? `${dir}/${cleanRepoPath(f.path)}` : cleanRepoPath(f.path));
+}
+const uniquePaths = [...new Set(paths)];
+lines.push(`فایل‌های افزوده/به‌روزشده: ${uniquePaths.length}${uniquePaths.length ? `\n${uniquePaths.slice(0, 15).map(p => `• ${p}`).join('\n')}` : ''}${uniquePaths.length > 15 ? `\n… و ${uniquePaths.length - 15} فایل دیگر` : ''}`);
+const deletes = (args.delete_paths || []).map(cleanRepoPath).filter(Boolean);
+if (deletes.length) lines.push(`⚠️ فایل‌های حذف‌شونده: ${deletes.slice(0, 15).join(', ')}${deletes.length > 15 ? ` و ${deletes.length - 15} مورد دیگر` : ''}`);
+} else if (name === 'github_create_branch') {
+lines.push(`مخزن: ${args.repo || 'نامشخص'} | شاخهٔ جدید: ${args.branch || 'نامشخص'} | مبنا: ${args.from || 'شاخهٔ پیش‌فرض'}`);
+} else if (name === 'github_create_pull_request') {
+lines.push(`مخزن: ${args.repo || 'نامشخص'} | ${args.head || 'head نامشخص'} → ${args.base || 'base پیش‌فرض'}`);
+lines.push(`عنوان: ${args.title || 'بدون عنوان'}`);
+} else if (name === 'workspace_write_file') {
+lines.push(`فایل: ${cleanRepoPath(args.path)} | ${new TextEncoder().encode(String(args.content ?? '')).length} بایت`);
+lines.push('اگر فایل هم‌نام وجود داشته باشد، محتوایش جایگزین می‌شود.');
+} else if (name === 'workspace_edit_file') {
+lines.push(`فایل: ${cleanRepoPath(args.path)} | جایگزینی ${String(args.old_text || '').length} نویسه با ${String(args.new_text || '').length} نویسه`);
+} else if (name === 'workspace_delete_file') {
+lines.push(`فایل برای حذف: ${cleanRepoPath(args.path)}`);
+} else {
+const safeKeys = ['repo', 'branch', 'base', 'head', 'org', 'name', 'path', 'target', 'worker', 'zone', 'account_id', 'environment', 'private'];
+const safe = Object.fromEntries(safeKeys.filter(k => args[k] !== undefined).map(k => [k, args[k]]));
+lines.push(`ابزار: ${name}${Object.keys(safe).length ? `\nهدف: ${JSON.stringify(safe)}` : ''}`);
+}
+return lines.join('\n');
+}
+
+function cloudflareSafeRecord(record) {
+return { id: record.id, type: record.type, name: record.name, content: record.content, ttl: record.ttl, proxied: !!record.proxied, priority: record.priority ?? null };
+}
+
+async function prepareCloudflareActionPreview(name, args, token) {
+if (name === 'cloudflare_create_dns_record') {
+validateCloudflareId(args.zone_id, 'zone_id');
+const type = String(args.type || '').toUpperCase();
+if (!['A', 'AAAA', 'CNAME', 'TXT', 'MX'].includes(type)) throw new Error('نوع رکورد باید یکی از A، AAAA، CNAME، TXT یا MX باشد.');
+if (!String(args.name || '').trim() || String(args.name).length > 253 || !String(args.content ?? '') || String(args.content).length > 2048) throw new Error('نام یا محتوای DNS معتبر نیست.');
+const ttl = args.ttl === undefined ? 1 : Number(args.ttl);
+if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error('TTL باید ۱ (خودکار) یا بین ۶۰ تا ۸۶۴۰۰ باشد.');
+if (args.proxied === true && !['A', 'AAAA', 'CNAME'].includes(type)) throw new Error('Proxied فقط برای A، AAAA و CNAME قابل استفاده است.');
+return { details: await buildCloudflareCreateDetails(args), recordFingerprint: null };
+}
+if (!['cloudflare_update_dns_record', 'cloudflare_delete_dns_record'].includes(name)) return { details: '', recordFingerprint: null };
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const recordId = validateCloudflareId(args.record_id, 'record_id');
+const data = await cloudflareApiRequest(token, 'GET', `/zones/${zoneId}/dns_records/${recordId}`);
+const record = cloudflareSafeRecord(data.result || {});
+if (!record.id) throw new Error('رکورد DNS موردنظر پیدا نشد.');
+if (name === 'cloudflare_update_dns_record') {
+if (args.content !== undefined && (!String(args.content) || String(args.content).length > 2048)) throw new Error('محتوای جدید DNS خالی یا بیش از حد بزرگ است.');
+if (args.ttl !== undefined) { const ttl = Number(args.ttl); if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error('TTL باید ۱ یا بین ۶۰ تا ۸۶۴۰۰ باشد.'); }
+if (args.proxied !== undefined && typeof args.proxied !== 'boolean') throw new Error('proxied باید true یا false باشد.');
+if (args.proxied === true && !['A', 'AAAA', 'CNAME'].includes(record.type)) throw new Error(`رکورد ${record.type} را نمی‌توان proxied کرد.`);
+if (args.content === undefined && args.ttl === undefined && args.proxied === undefined) throw new Error('حداقل یکی از content، ttl یا proxied را مشخص کن.');
+}
+const details = name === 'cloudflare_delete_dns_record'
+? `Zone ID: ${zoneId}\nرکوردی که حذف می‌شود: ${record.type} ${record.name} → ${record.content}\nTTL: ${record.ttl} | Proxied: ${record.proxied}\nاین حذف دائمی است.`
+: `Zone ID: ${zoneId}\nرکورد فعلی: ${record.type} ${record.name} → ${record.content}\nمقدار درخواستی: ${args.content ?? record.content}\nTTL: ${args.ttl ?? record.ttl} | Proxied: ${args.proxied ?? record.proxied}`;
+return { details, recordFingerprint: await textFingerprint(JSON.stringify(record)) };
+}
+
+async function buildCloudflareCreateDetails(args) {
+return `Zone ID: ${args.zone_id}\nایجاد ${args.type} ${args.name} → ${args.content}\nTTL: ${args.ttl ?? 1} (۱=خودکار) | Proxied: ${args.proxied === true ? 'بله' : 'خیر'}${args.type === 'MX' ? ` | Priority: ${args.priority ?? 10}` : ''}`;
+}
+
+function validateCloudflareId(value, label = 'ID') {
+const id = String(value || '');
+if (!/^[a-f0-9]{32}$/i.test(id)) throw new Error(`${label} باید یک شناسهٔ ۳۲ کاراکتری هگزادسیمال Cloudflare باشد.`);
+return id;
+}
+
 // ---------- اجرای ابزارها ----------
 async function executeTool(name, args, ctx) {
 const { env, chatId, userId } = ctx;
+const needCloudflareToken = async () => {
+if (String(chatId) !== String(userId)) throw new Error('برای حفظ حریم خصوصی، ابزارهای Cloudflare فقط در گفت‌وگوی خصوصی قابل استفاده‌اند.');
+if (ctx.cloudflareToken === undefined) ctx.cloudflareToken = await getCloudflareToken(userId, env);
+if (!ctx.cloudflareToken) throw new Error('Cloudflare وصل نیست. در گفت‌وگوی خصوصی /cloudflare را بزن و اتصال امن را کامل کن.');
+return ctx.cloudflareToken;
+};
 const needToken = async () => {
 if (ctx.token === undefined) ctx.token = await getGithubToken(userId, env);
 if (!ctx.token) {
@@ -2635,6 +3325,90 @@ const base = args.base || (await ghRequest(t, 'GET', `/repos/${full}`)).data.def
 const { data } = await ghRequest(t, 'POST', `/repos/${full}/pulls`, { title: args.title, head: args.head, base, body: args.body || '' });
 return { ok: true, number: data.number, html_url: data.html_url };
 }
+case 'cloudflare_list_zones': {
+const t = await needCloudflareToken();
+const query = new URLSearchParams({ per_page: '50', page: '1' });
+if (args.name) query.set('name', String(args.name).slice(0, 253));
+const data = await cloudflareApiRequest(t, 'GET', `/zones?${query}`);
+return (data.result || []).map(z => ({ id: z.id, name: z.name, status: z.status, account_name: z.account?.name || null }));
+}
+case 'cloudflare_list_dns_records': {
+const t = await needCloudflareToken();
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const query = new URLSearchParams({ per_page: '100', page: '1' });
+if (args.name) query.set('name', String(args.name).slice(0, 253));
+if (args.type) query.set('type', String(args.type).toUpperCase());
+const data = await cloudflareApiRequest(t, 'GET', `/zones/${zoneId}/dns_records?${query}`);
+return (data.result || []).map(cloudflareSafeRecord);
+}
+case 'cloudflare_create_dns_record': {
+const t = await needCloudflareToken();
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const type = String(args.type || '').toUpperCase();
+if (!['A', 'AAAA', 'CNAME', 'TXT', 'MX'].includes(type)) throw new Error('نوع رکورد باید یکی از A، AAAA، CNAME، TXT یا MX باشد.');
+const name = String(args.name || '').trim();
+const content = String(args.content ?? '');
+if (!name || name.length > 253 || /[\r\n\u0000]/.test(name)) throw new Error('نام DNS معتبر نیست.');
+if (!content || content.length > 2048 || /[\u0000]/.test(content)) throw new Error('محتوای DNS خالی یا بیش از حد بزرگ است.');
+const ttl = args.ttl === undefined ? 1 : Number(args.ttl);
+if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error('TTL باید ۱ (خودکار) یا بین ۶۰ تا ۸۶۴۰۰ باشد.');
+const proxied = args.proxied === true;
+if (proxied && !['A', 'AAAA', 'CNAME'].includes(type)) throw new Error('Proxied فقط برای A، AAAA و CNAME قابل استفاده است.');
+const body = { type, name, content, ttl, proxied };
+if (type === 'MX') body.priority = Number.isInteger(args.priority) ? Math.max(0, Math.min(65535, args.priority)) : 10;
+const data = await cloudflareApiRequest(t, 'POST', `/zones/${zoneId}/dns_records`, body);
+return { ok: true, record: cloudflareSafeRecord(data.result || {}) };
+}
+case 'cloudflare_update_dns_record': {
+const t = await needCloudflareToken();
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const recordId = validateCloudflareId(args.record_id, 'record_id');
+const body = {};
+if (args.content !== undefined) {
+const content = String(args.content);
+if (!content || content.length > 2048 || /[\u0000]/.test(content)) throw new Error('محتوای DNS معتبر نیست.');
+body.content = content;
+}
+if (args.ttl !== undefined) {
+const ttl = Number(args.ttl);
+if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error('TTL باید ۱ یا بین ۶۰ تا ۸۶۴۰۰ باشد.');
+body.ttl = ttl;
+}
+if (args.proxied !== undefined) {
+if (typeof args.proxied !== 'boolean') throw new Error('proxied باید true یا false باشد.');
+body.proxied = args.proxied;
+}
+if (!Object.keys(body).length) throw new Error('حداقل یکی از content، ttl یا proxied را مشخص کن.');
+const data = await cloudflareApiRequest(t, 'PATCH', `/zones/${zoneId}/dns_records/${recordId}`, body);
+return { ok: true, record: cloudflareSafeRecord(data.result || {}) };
+}
+case 'cloudflare_delete_dns_record': {
+const t = await needCloudflareToken();
+const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
+const recordId = validateCloudflareId(args.record_id, 'record_id');
+const data = await cloudflareApiRequest(t, 'DELETE', `/zones/${zoneId}/dns_records/${recordId}`);
+return { ok: true, deleted_id: data.result?.id || recordId };
+}
+case 'cloudflare_list_workers': {
+const t = await needCloudflareToken();
+const accountId = validateCloudflareId(args.account_id, 'account_id');
+const data = await cloudflareApiRequest(t, 'GET', `/accounts/${accountId}/workers/scripts?per_page=100`);
+return (data.result || []).slice(0, 100).map(w => ({ id: w.id, created_on: w.created_on, modified_on: w.modified_on, compatibility_date: w.compatibility_date, usage_model: w.usage_model, etag: w.etag }));
+}
+case 'cloudflare_get_worker': {
+const t = await needCloudflareToken();
+const accountId = validateCloudflareId(args.account_id, 'account_id');
+const scriptName = String(args.script_name || '');
+if (!/^[A-Za-z0-9_-]{1,128}$/.test(scriptName)) throw new Error('نام Worker معتبر نیست.');
+const data = await cloudflareApiRequest(t, 'GET', `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/script-settings`);
+const result = data.result || {};
+return { logpush: result.logpush, observability: result.observability ? {
+enabled: result.observability.enabled,
+head_sampling_rate: result.observability.head_sampling_rate,
+logs: result.observability.logs ? { enabled: result.observability.logs.enabled, invocation_logs: result.observability.logs.invocation_logs, persist: result.observability.logs.persist } : undefined,
+traces: result.observability.traces ? { enabled: result.observability.traces.enabled, head_sampling_rate: result.observability.traces.head_sampling_rate } : undefined
+} : undefined, tags: result.tags };
+}
 case 'workspace_list_files': {
 const ws = await getWorkspace(chatId, env);
 return {
@@ -2728,12 +3502,15 @@ const history = await getHistory(chatId, env, settings);
 
 // زمینه: وضعیت اتصال گیت‌هاب و فضای کار (بدون افشای توکن)
 const token = await getGithubToken(userId, env);
+let cloudflareToken = null;
+try { cloudflareToken = await getCloudflareToken(userId, env); } catch (e) { console.error('Cloudflare credential unavailable:', e?.message || e); }
 const activeProject = await getActiveProject(chatId, env);
 const linkedRepo = activeProject ? await getProjectRepo(chatId, activeProject.id, env) : null;
 const ws = await getWorkspace(chatId, env);
 let context = `\n\nوضعیت فعلی:\n- گیت‌هاب: ${token ? 'وصل است (توکن ذخیره شده)' : 'وصل نیست — اگر کاربر کار گیت‌هابی خواست، بگو توکن را با /github <توکن> بفرستد'}`;
 context += `\n- پروژهٔ فعال: ${activeProject ? `«${activeProject.name}» (حافظه و فضای کار جداگانه)` : 'حالت پیش‌فرض ربات'}`;
 if (linkedRepo) context += `\n- مخزن GitHub پروژه: ${linkedRepo.repo} (برنچ ${linkedRepo.branch})`;
+context += `\n- Cloudflare: ${cloudflareToken ? 'وصل است؛ ابزارهای مشاهده و مدیریت DNS با تأیید در دسترس‌اند' : 'وصل نیست؛ برای اتصال امن در گفت‌وگوی خصوصی /cloudflare را راهنمایی کن'}`;
 context += `\n- فضای کار: ${ws.files.length ? `«${ws.name || 'بدون نام'}» با ${ws.files.length} فایل` : 'خالی'}`;
 context += `\n- تاریخ: ${new Date().toISOString().slice(0, 10)}`;
 if (opts.isCode) context += '\n- پیام کاربر احتمالاً کد یا لاگ خطاست؛ مشکل واقعی را پیدا کن و راه‌حل بده.';
@@ -2744,7 +3521,7 @@ const messages = [
 { role: 'user', content: userContent }
 ];
 
-const ctx = { env, chatId, userId, token: token || null, login: null };
+const ctx = { env, chatId, userId, token: token || null, cloudflareToken: cloudflareToken || null, login: null };
 const status = createStatus(chatId, env);
 let finalText = '';
 // با مدل شخصی کاربر، پرچم سراسری نادیده گرفته می‌شود (ممکن است مدل او ابزارها را پشتیبانی کند)
@@ -2778,6 +3555,43 @@ for (const call of calls) {
 const name = call.function?.name;
 let args = {};
 try { args = JSON.parse(call.function?.arguments || '{}'); } catch (e) { args = {}; }
+if (typeof name !== 'string' || !AGENT_TOOLS.some(t => t.function?.name === name)) {
+messages.push({ role: 'tool', tool_call_id: call.id, content: stringifyToolResult({ error: 'این ابزار در رجیستری مجاز ربات وجود ندارد و اجرا نشد.' }) });
+continue;
+}
+if (name.startsWith('cloudflare_') && String(chatId) !== String(userId)) {
+messages.push({ role: 'tool', tool_call_id: call.id, content: stringifyToolResult({ error: 'ابزارهای Cloudflare فقط در گفت‌وگوی خصوصی قابل استفاده‌اند.' }) });
+continue;
+}
+const canPreviewMutation = name.startsWith('github_') ? !!token : name.startsWith('cloudflare_') ? !!cloudflareToken : true;
+if (agentToolNeedsApproval(name) && canPreviewMutation) {
+try {
+const currentProject = await getActiveProject(chatId, env);
+const tokenFingerprint = name.startsWith('github_') ? await textFingerprint(token) : null;
+const cloudflareTokenFingerprint = name.startsWith('cloudflare_') ? await textFingerprint(cloudflareToken) : null;
+const cfPreview = name.startsWith('cloudflare_') ? await prepareCloudflareActionPreview(name, args, cloudflareToken) : null;
+const details = cfPreview?.details || await buildAgentActionDetails(name, args, chatId, env);
+const bindsWorkspace = name.startsWith('workspace_') || (name === 'github_push' && (args.from_workspace || args.workspace_paths?.length));
+const currentWorkspace = bindsWorkspace ? await getWorkspace(chatId, env) : null;
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'agent_tool',
+payload: {
+toolName: name, args, activeProjectId: currentProject?.id || null,
+githubTokenFingerprint: tokenFingerprint,
+cloudflareTokenFingerprint,
+cloudflareRecordFingerprint: cfPreview?.recordFingerprint || null,
+workspaceFingerprint: currentWorkspace ? await projectFilesFingerprint(currentWorkspace.files || []) : null,
+requestText: String(opts.historyText || userContent).substring(0, MEMORY_MAX_CHARS_PER_MSG)
+},
+title: toolLabel(name, args),
+details: details || 'این ابزار تغییری در داده‌ها یا حساب متصل ایجاد می‌کند.'
+});
+} catch (approvalError) {
+console.error('could not create action approval:', approvalError?.message || approvalError);
+await sendMessage(chatId, `⛔ عملیات اجرا نشد؛ نتوانستم پیش‌نمایش تأیید را امن ذخیره کنم. دوباره تلاش کن.`, env);
+}
+return;
+}
 const idx = await status.start(toolLabel(name, args));
 await sendChatAction(chatId, 'typing', env);
 let result;
