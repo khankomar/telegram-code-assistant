@@ -83,6 +83,7 @@ npx wrangler secret put OPENAI_API_KEY        # اختیاری
 npx wrangler secret put ADMIN_SECRET           # اختیاری - برای پنل ادمین
 npx wrangler secret put WEBHOOK_SECRET         # اختیاری
 npx wrangler secret put CLOUDFLARE_ENCRYPTION_KEY # اختیاری؛ فقط برای اتصال Cloudflare
+npx wrangler secret put CREDENTIALS_ENCRYPTION_KEY # برای رمزگذاری credentialهای GitHub
 ```
 
 ⚠️ `TELEGRAM_BOT_TOKEN` را در تنظیمات Worker با نوع **Secret** ذخیره کنید، نه به‌صورت متغیر plain text. برای GitHub Actions، فقط `CLOUDFLARE_API_TOKEN` و `CLOUDFLARE_ACCOUNT_ID` را در Secrets مخزن قرار دهید؛ توکن تلگرام در Secret خود Worker باقی می‌ماند. Wrangler با deploy معمولی Secretهای موجود را حذف نمی‌کند.
@@ -91,8 +92,8 @@ npx wrangler secret put CLOUDFLARE_ENCRYPTION_KEY # اختیاری؛ فقط بر
 
 - **D1 Database**: برای حافظه گفتگو و کاربران
 - **KV Namespaces**: 
-- `STATS`: آمار، تنظیمات، توکن گیت‌هاب، فضای کار
-- `DB`: تاریخچه، approvalها، و Cloudflare integration tokenهای AES-GCM encrypted
+- `STATS`: آمار، تنظیمات، workspace و پروژه‌ها؛ توکن‌های قدیمی GitHub فقط تا زمان مهاجرت lazy
+- `DB`: تاریخچه، approvalها، و credentialهای GitHub/Cloudflare به‌صورت AES-GCM encrypted
   - `FILES`: متادیتای فایل‌ها
 
 ## استقرار
@@ -118,11 +119,15 @@ wrangler deploy
 
 ## امنیت
 
-- توکن‌های GitHub هر کاربر جداگانه در KV ذخیره می‌شود
+- توکن‌های جدید GitHub با AES-GCM و AAD وابسته به کاربر در D1 ذخیره می‌شوند؛ برای فعال‌بودن این قابلیت `CREDENTIALS_ENCRYPTION_KEY` را به‌عنوان Worker Secret تنظیم کنید (اگر موجود باشد، `CLOUDFLARE_ENCRYPTION_KEY` نیز برای سازگاری قابل استفاده است)
+- توکن‌های قدیمی plaintext در KV هنگام استفاده، در صورت موجودبودن کلید رمزگذاری به‌صورت lazy به D1 منتقل و از KV حذف می‌شوند؛ تا قبل از آماده‌شدن کلید، توکن قدیمی برای حفظ سازگاری قابل استفاده می‌ماند، اما توکن جدید بدون کلید هرگز ذخیره نمی‌شود
+- credential GitHub حداکثر ۳۰ روز اعتبار ذخیره‌سازی دارد؛ حذف اتصال یک tombstone در D1 نگه می‌دارد تا مهاجرت هم‌زمان نتواند credential حذف‌شده را برگرداند
 - توکن Cloudflare از چت تلگرام دریافت نمی‌شود؛ از فرم HTTPS یک‌بارمصرف می‌آید و پیش از ذخیره در D1 با AES-GCM رمز می‌شود
 - فایل‌های `.env` و رمزها در ZIP نادیده گرفته می‌شوند
 - پیام حاوی توکن بلافاصله از چت پاک می‌شود
 - تأیید عملیات در D1 به کاربر و گفتگو bind می‌شود؛ payload موقت فقط تا پنج دقیقه در KV نگه داشته می‌شود و تأیید تکراری پذیرفته نیست
+- خطاهای خام provider/runtime و stack trace به کاربر نمایش داده نمی‌شوند؛ لایهٔ مرکزی پیام‌های کوتاه بر اساس سرویس/وضعیت می‌سازد و لاگ‌های برنامه فقط context، نوع خطا و در صورت وجود status را ثبت می‌کنند
+- خطاهای پیش‌بینی‌نشده در HTTP با پاسخ عمومی و `request_id` پاسخ داده می‌شوند؛ برای تشخیص مشکل، شناسهٔ درخواست را نگه دارید و جزئیات داخلی را در چت یا مرورگر منتشر نکنید
 
 ---
 پروژه شخصی

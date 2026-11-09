@@ -10,6 +10,36 @@
 const DEFAULT_AI_BASE_URL = 'https://bedrock-mantle.us-east-2.api.aws/v1';
 const DEFAULT_AI_MODEL = 'anthropic/claude-sonnet-4';
 
+// خطاهای داخلی/provider نباید بدون پالایش به Telegram، پنل یا پاسخ HTTP برسند.
+function userSafeErrorMessage(error, context = 'general') {
+if (typeof error?.userMessage === 'string' && error.userMessage.trim()) return error.userMessage.trim().slice(0, 400);
+if (/CREDENTIALS_ENCRYPTION_KEY/.test(String(error?.message || ''))) return 'ذخیرهٔ امن توکن آماده نیست؛ مدیر باید Worker Secret با نام CREDENTIALS_ENCRYPTION_KEY را تنظیم کند.';
+const status = Number(error?.status || error?.statusCode || 0);
+if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'درخواست بیش از حد طول کشید. کمی بعد دوباره تلاش کن.';
+if (status === 401) return context === 'github' ? 'دسترسی GitHub معتبر نیست یا منقضی شده است؛ اتصال را دوباره انجام بده.' : 'اعتبار دسترسی سرویس پذیرفته نشد؛ تنظیمات اتصال را بررسی کن.';
+if (status === 403) return context === 'github' ? 'این توکن GitHub اجازهٔ انجام این کار را ندارد؛ مجوزهای مخزن را بررسی کن.' : 'دسترسی لازم برای این کار وجود ندارد؛ مجوزهای اتصال را بررسی کن.';
+if (status === 404) return context === 'github' ? 'مخزن یا فایل در GitHub پیدا نشد؛ نام و دسترسی را بررسی کن.' : 'منبع درخواستی پیدا نشد؛ شناسه و مقصد را بررسی کن.';
+if (status === 429) return 'سرویس درخواست‌های زیادی دریافت کرده است. کمی صبر کن و دوباره تلاش کن.';
+if (status >= 500) return context === 'ai' ? 'سرویس هوش مصنوعی موقتاً در دسترس نیست. کمی بعد دوباره تلاش کن.' : 'سرویس موقتاً در دسترس نیست. کمی بعد دوباره تلاش کن.';
+if (context === 'github') return 'عملیات GitHub انجام نشد. اتصال، نام مخزن و مجوزها را بررسی کن.';
+if (context === 'ai') return 'سرویس هوش مصنوعی نتوانست درخواست را کامل کند. اتصال و تنظیمات را بررسی کن یا کمی بعد دوباره تلاش کن.';
+if (context === 'cloudflare') return 'عملیات Cloudflare انجام نشد. اتصال، دسترسی‌ها و مقصد را بررسی کن.';
+if (context === 'file') return 'پردازش فایل انجام نشد. نوع و محتوای فایل را بررسی کن و دوباره تلاش کن.';
+return 'انجام این درخواست با مشکل روبه‌رو شد. کمی بعد دوباره تلاش کن.';
+}
+
+function publicError(message) {
+const error = new Error(message);
+error.userMessage = message;
+return error;
+}
+
+function logSafeError(context, error) {
+const name = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(error.name) ? error.name : 'Error';
+const status = Number.isInteger(Number(error?.status)) ? Number(error.status) : undefined;
+console.error('Handled application error', { context: String(context).slice(0, 40), name, ...(status ? { status } : {}) });
+}
+
 // =============== حافظه گفتگو ===============
 const MEMORY_DEFAULT_MESSAGES = 30;      // تعداد پیام‌های نگه‌داشته‌شده (کاربر + ربات)
 const MEMORY_MAX_CHARS_PER_MSG = 4000;   // سقف طول هر پیام ذخیره‌شده
@@ -112,6 +142,7 @@ const ZIP_SECRET_FILES = /(^|\/)\.env(\..*)?$/i;
 
 export default {
 async fetch(request, env, ctx) {
+try {
 // CORS
 if (request.method === 'OPTIONS') {
 return new Response(null, {
@@ -207,6 +238,14 @@ return await deleteFile(url.searchParams.get('key'), env);
 if (url.pathname === '/api/system' && request.method === 'GET') return await getSystemStatus(env);
 
 return new Response('Bot is running! 🤖', { status: 200 });
+} catch (error) {
+const requestId = crypto.randomUUID();
+logSafeError('http_request', error);
+return new Response(JSON.stringify({ error: 'درخواست قابل انجام نیست. کمی بعد دوباره تلاش کن.', request_id: requestId }), {
+status: 500,
+headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' }
+});
+}
 }
 };
 
@@ -546,7 +585,7 @@ el.innerHTML = result.ok
 ? '<div class="badge badge-success">✅ ' + result.message + '</div>'
 : '<div class="badge badge-danger">❌ ' + result.message + '</div>';
 } catch (e) {
-el.innerHTML = '<div class="badge badge-danger">❌ خطا: ' + e.message + '</div>';
+el.textContent = '❌ درخواست ناموفق بود. اتصال شبکه را بررسی کن و دوباره تلاش کن.';
 }
 }
 
@@ -868,8 +907,8 @@ await addHistory(chatId, [
 } catch (error) {
 await finishActionApproval(env, id, 'failed');
 await env.STATS.delete(row.payload_key);
-console.error('approved action failed:', row.kind, error?.message || error);
-await sendMessage(chatId, `❌ اجرای عملیات تأییدشده ناموفق بود: ${String(error.message || error).substring(0, 700)}`, env);
+logSafeError('approved_action', error);
+await sendMessage(chatId, `❌ اجرای عملیات تأییدشده ناموفق بود. ${userSafeErrorMessage(error)}`, env);
 }
 }
 
@@ -910,7 +949,7 @@ const zoneId = validateCloudflareId(args.zone_id, 'zone_id');
 const recordId = validateCloudflareId(args.record_id, 'record_id');
 const current = await cloudflareApiRequest(cloudflareToken, 'GET', `/zones/${zoneId}/dns_records/${recordId}`);
 const fingerprint = await textFingerprint(JSON.stringify(cloudflareSafeRecord(current.result || {})));
-if (fingerprint !== payload.cloudflareRecordFingerprint) throw new Error('رکورد DNS از زمان preview تغییر کرده؛ هیچ تغییری اعمال نشد. دوباره preview بگیر.');
+if (fingerprint !== payload.cloudflareRecordFingerprint) throw publicError('رکورد DNS از زمان preview تغییر کرده؛ هیچ تغییری اعمال نشد. دوباره preview بگیر.');
 }
 return await executeTool(payload.toolName, payload.args || {}, { env, chatId, userId, token: undefined, cloudflareToken, login: null });
 }
@@ -933,7 +972,7 @@ const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
 if (!project || project.id !== payload.projectId || !linked || linked.repo !== payload.repo || linked.branch !== payload.branch) throw new Error('پروژه یا مقصد GitHub از زمان preview عوض شده؛ دوباره پیش‌نمایش بگیر.');
 const ws = await getWorkspace(chatId, env);
 const files = projectSyncFiles(ws);
-if (!files.length || await projectFilesFingerprint(files) !== payload.fingerprint) throw new Error('فایل‌های workspace از زمان preview تغییر کرده‌اند؛ دوباره پیش‌نمایش بگیر.');
+if (!files.length || await projectFilesFingerprint(files) !== payload.fingerprint) throw publicError('فایل‌های workspace از زمان preview تغییر کرده‌اند؛ دوباره پیش‌نمایش بگیر.');
 const token = await getGithubToken(userId, env);
 if (!token || await textFingerprint(token) !== payload.githubTokenFingerprint) throw new Error('اتصال GitHub از زمان preview تغییر کرده؛ دوباره آن را بررسی کن.');
 const result = await githubPushFiles(token, linked.repo, {
@@ -947,10 +986,10 @@ if (kind === 'project_pull_overwrite') {
 const project = await getActiveProject(chatId, env);
 const linked = project ? await getProjectRepo(chatId, project.id, env) : null;
 if (!project || project.id !== payload.projectId || !linked || linked.repo !== payload.repo || linked.branch !== payload.branch) {
-throw new Error('پروژه یا مخزن از زمان پیش‌نمایش عوض شده؛ درخواست را دوباره بفرست.');
+throw publicError('پروژه یا مخزن از زمان پیش‌نمایش عوض شده؛ درخواست را دوباره بفرست.');
 }
 const ws = await getWorkspace(chatId, env);
-if (await projectFilesFingerprint(ws.files || []) !== payload.workspaceFingerprint) throw new Error('فایل‌های workspace از زمان پیش‌نمایش تغییر کرده‌اند؛ درخواست را دوباره بفرست.');
+if (await projectFilesFingerprint(ws.files || []) !== payload.workspaceFingerprint) throw publicError('فایل‌های workspace از زمان پیش‌نمایش تغییر کرده‌اند؛ درخواست را دوباره بفرست.');
 const ok = await pullProjectRepo(chatId, userId, env, true, payload.treeSha, payload.workspaceFingerprint);
 if (!ok) throw new Error('دریافت overwrite کامل نشد؛ جزئیات در پیام منوی GitHub آمده است.');
 return { reportedToChat: true };
@@ -993,7 +1032,7 @@ await sendAiMenu(chatId, userId, env);
 }
 else await sendAiMenu(chatId, userId, env);
 } catch (e) {
-console.error('callback error', e);
+logSafeError('callback', e);
 }
 }
 
@@ -1110,7 +1149,7 @@ await sendMessage(chatId,
 } catch (e) {
 // جریان در همین قدم می‌ماند تا کاربر نام مدل دیگری بفرستد
 await sendMessage(chatId,
-`❌ تست اتصال ناموفق بود:\n${e.message}\n\n` +
+`❌ تست اتصال ناموفق بود:\n${userSafeErrorMessage(e, 'ai')}\n\n` +
 'نام مدل دیگری بفرست، یا اگر Base URL یا کلید مشکل داره «' + BTN.cancel + '» را بزن و از اول شروع کن.', env, cancelKeyboard());
 }
 return true;
@@ -1175,7 +1214,8 @@ env,
 );
 return jsonResponse({ ok: true, message: 'اتصال موفق! پاسخ مدل: ' + String(reply).trim().substring(0, 60) });
 } catch (e) {
-return jsonResponse({ ok: false, message: e.message });
+logSafeError('ai_connection_test', e);
+return jsonResponse({ ok: false, message: userSafeErrorMessage(e, 'ai') });
 }
 }
 
@@ -1256,7 +1296,7 @@ await env.DB.prepare('DELETE FROM processed_updates WHERE created_at < ?').bind(
 }
 return (r.meta?.changes ?? 1) === 0;
 } catch (e) {
-console.error('dedupe error', e);
+logSafeError('update_dedupe', e);
 return false;
 }
 }
@@ -1287,7 +1327,7 @@ else out.push({ role: r.role, content: r.content });
 }
 return out;
 } catch (e) {
-console.error('history read error', e);
+logSafeError('history_read', e);
 return [];
 }
 }
@@ -1314,7 +1354,7 @@ SELECT id FROM project_chat_history WHERE chat_id = ? AND project_id = ? ORDER B
 SELECT id FROM chat_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?)`
 ).bind(chatId, chatId, keep).run();
 } catch (e) {
-console.error('history write error', e);
+logSafeError('history_write', e);
 }
 }
 
@@ -1405,7 +1445,7 @@ const fullRepo = data.full_name || repo;
 const branch = branchInput || data.default_branch || 'main';
 await env.STATS.put(projectRepoKey(chatId, project.id), JSON.stringify({ repo: fullRepo, branch, linked_at: new Date().toISOString() }));
 return { ok: true, repo: fullRepo, branch, message: `✅ پروژهٔ «${project.name}» به ${fullRepo} وصل شد (برنچ ${branch}).` };
-} catch (e) { return { ok: false, message: `اتصال مخزن انجام نشد: ${e.message}` }; }
+} catch (e) { logSafeError('github_link_repo', e); return { ok: false, message: `اتصال مخزن انجام نشد. ${userSafeErrorMessage(e, 'github')}` }; }
 }
 
 async function sendProjectGithubMenu(chatId, userId, env, notice = '') {
@@ -1490,7 +1530,8 @@ const report = `⬇️ دریافت از ${linked.repo}@${linked.branch} تما�
 await sendProjectGithubMenu(chatId, userId, env, report);
 return true;
 } catch (e) {
-await sendProjectGithubMenu(chatId, userId, env, `❌ دریافت مخزن ناموفق بود: ${e.message}`);
+logSafeError('github_pull', e);
+await sendProjectGithubMenu(chatId, userId, env, `❌ دریافت مخزن ناموفق بود. ${userSafeErrorMessage(e, 'github')}`);
 return false;
 }
 }
@@ -1536,7 +1577,8 @@ title: 'جایگزینی فایل‌های محلی با نسخهٔ مخزن',
 details: `پروژه: ${project.name}\nمخزن: ${linked.repo}@${linked.branch}\nفایل‌های هم‌نامی که جایگزین می‌شوند: ${conflicts.length}\n${listed}${conflicts.length > 15 ? `\n… و ${conflicts.length - 15} فایل دیگر` : ''}\n\nاگر فایل‌های workspace یا شاخهٔ GitHub قبل از تأیید تغییر کنند، عملیات متوقف می‌شود.`
 });
 } catch (error) {
-await sendProjectGithubMenu(chatId, userId, env, `❌ ساخت پیش‌نمایش overwrite ناموفق بود: ${error.message}`);
+logSafeError('github_overwrite_preview', error);
+await sendProjectGithubMenu(chatId, userId, env, `❌ ساخت پیش‌نمایش overwrite ناموفق بود. ${userSafeErrorMessage(error, 'github')}`);
 }
 }
 
@@ -1596,7 +1638,8 @@ files: files.map(f => ({ path: cleanRepoPath(f.path), text: f.text, b64: f.b64 }
 });
 await sendProjectGithubMenu(chatId, userId, env, `✅ ارسال کامل شد: ${result.files_pushed || files.length} فایل به ${linked.repo}@${linked.branch}. ${result.commit_url || ''}`);
 } catch (e) {
-await sendProjectGithubMenu(chatId, userId, env, `❌ ارسال ناموفق بود: ${e.message}`);
+logSafeError('github_push', e);
+await sendProjectGithubMenu(chatId, userId, env, `❌ ارسال ناموفق بود. ${userSafeErrorMessage(e, 'github')}`);
 }
 }
 
@@ -1773,7 +1816,7 @@ const result = await response.json();
 if (!response.ok || !result.ok) throw new Error(result.description || `HTTP ${response.status}`);
 await env.STATS.put(versionKey, TELEGRAM_COMMANDS_VERSION);
 } catch (error) {
-console.error('Telegram command menu registration failed:', error?.message || error);
+logSafeError('telegram_command_menu', error);
 }
 }
 
@@ -1822,8 +1865,8 @@ await saveGithubTokenFromChat(chatId, userId, text.trim(), env, messageId);
 await handleText(chatId, userId, text, env);
 }
 } catch (error) {
-console.error('Error:', error);
-await sendMessage(chatId, `❌ خطا: ${error.message}`, env);
+logSafeError('telegram_update', error);
+await sendMessage(chatId, `❌ ${userSafeErrorMessage(error)}`, env);
 }
 }
 
@@ -1945,7 +1988,7 @@ case '/github': {
 if (args.length === 0) {
 await sendGithubStatus(chatId, userId, env);
 } else if (['off', 'logout', 'remove'].includes(args[0].toLowerCase())) {
-await env.STATS.delete(ghTokenKey(userId));
+await deleteGithubCredential(userId, env);
 await sendMessage(chatId, 'توکن گیت‌هاب پاک شد.', env);
 } else {
 await saveGithubTokenFromChat(chatId, userId, args[0], env, messageId);
@@ -1954,7 +1997,7 @@ break;
 }
 
 case '/github_off': {
-await env.STATS.delete(ghTokenKey(userId));
+await deleteGithubCredential(userId, env);
 await sendMessage(chatId, 'توکن گیت‌هاب پاک شد.', env);
 break;
 }
@@ -2053,7 +2096,8 @@ if (isCode) await incrementStat('total_code', env);
 try {
 await runAgent(chatId, userId, text, env, settings, { isCode });
 } catch (e) {
-await sendLongMessage(chatId, 'یه مشکلی با سرویس هوش مصنوعی پیش اومد: ' + e.message, env);
+logSafeError('ai_chat', e);
+await sendLongMessage(chatId, userSafeErrorMessage(e, 'ai'), env);
 }
 return;
 }
@@ -2101,7 +2145,8 @@ const buffer = await downloadTelegramFile(fileInfo.file_path, env);
 const mime = (fileInfo.file_path || '').toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
 await analyzeImage(chatId, userId, buffer, mime, caption, env, settings);
 } catch (error) {
-await sendLongMessage(chatId, `❌ خطا در پردازش عکس: ${error.message}`, env);
+logSafeError('image_processing', error);
+await sendLongMessage(chatId, `❌ ${userSafeErrorMessage(error, 'ai')}`, env);
 }
 }
 
@@ -2190,7 +2235,8 @@ await handleTextFile(chatId, userId, buffer, fileName, env, settings, caption, u
 await sendMessage(chatId, `📦 فایل «${fileName}» (${formatSizeClient(buffer.byteLength)}) ذخیره شد.\n💡 فقط فایل‌های متنی/کد، تصویر و ZIP تحلیل می‌شوند.`, env);
 }
 } catch (error) {
-await sendMessage(chatId, `❌ خطا در پردازش فایل: ${error.message}`, env);
+logSafeError('file_processing', error);
+await sendMessage(chatId, `❌ ${userSafeErrorMessage(error, 'file')}`, env);
 }
 }
 
@@ -2204,7 +2250,7 @@ if (!ZIP_SECRET_FILES.test(fileName)) {
 try {
 await addFilesToWorkspace(chatId, [{ path: fileName, size: buffer.byteLength, text }], env, null);
 wsNote = fileName;
-} catch (e) { console.error('workspace add error', e); }
+} catch (e) { logSafeError('workspace_add', e); }
 }
 
 // اگر کاربر زیر فایل درخواست نوشته (مثلاً «اینو تو ریپوی X پوش کن»)، ایجنت انجامش می‌دهد
@@ -2250,7 +2296,8 @@ let files;
 try {
 files = await extractZip(buffer);
 } catch (e) {
-await sendMessage(chatId, `باز کردن ZIP ناموفق بود: ${e.message}`, env);
+logSafeError('zip_processing', e);
+await sendMessage(chatId, `باز کردن فایل ZIP ناموفق بود. ${userSafeErrorMessage(e, 'file')}`, env);
 return;
 }
 
@@ -2258,9 +2305,7 @@ return;
 let wsInfo = null;
 try {
 wsInfo = await saveZipToWorkspace(chatId, buffer, fileName, env);
-} catch (e) {
-console.error('workspace save error', e);
-}
+} catch (e) { logSafeError('workspace_save', e); }
 
 // اگر کاربر زیر ZIP درخواستی نوشته (مثلاً پوش به گیت‌هاب)، ایجنت انجامش می‌دهد
 if (caption && (await hasAnyAI(userId, env, settings))) {
@@ -2448,7 +2493,8 @@ related.map(t => `• ${t.Text}${t.FirstURL ? '\n ' + t.FirstURL : ''}`).join('\
 
 return result || 'نتیجه مشخصی برای این عبارت پیدا نشد. عبارت دیگری را امتحان کنید.';
 } catch (error) {
-return `خطا در جستجو: ${error.message}`;
+logSafeError('web_search', error);
+return 'جستجو موقتاً انجام نشد. کمی بعد دوباره تلاش کن.';
 }
 }
 
@@ -2465,6 +2511,60 @@ let agentToolsUnsupported = false;    // اگر مدل/سرویس از tool call
 
 // ---------- توکن گیت‌هاب (هر کاربر جدا؛ هرگز به مدل داده نمی‌شود) ----------
 function ghTokenKey(userId) { return `gh_token:${userId}`; }
+function githubCredentialMetadata(expiresAt, deleted = false) {
+return JSON.stringify(deleted ? { deleted: true } : { expiresAt });
+}
+
+async function credentialCryptoKey(env) {
+const value = env.CREDENTIALS_ENCRYPTION_KEY || env.CLOUDFLARE_ENCRYPTION_KEY;
+if (!value) throw publicError('ذخیرهٔ امن توکن GitHub آماده نیست؛ مدیر باید CREDENTIALS_ENCRYPTION_KEY را به‌عنوان Worker Secret تنظیم کند.');
+let raw;
+try { raw = cfUnb64(String(value).trim()); } catch { throw new Error('کلید رمزگذاری اعتبارنامه باید Base64 معتبرِ ۳۲ بایتی باشد.'); }
+if (raw.length !== 32) throw new Error('کلید رمزگذاری اعتبارنامه باید Base64 معتبرِ ۳۲ بایتی باشد.');
+return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+function githubCredentialAAD(userId) { return new TextEncoder().encode(`telegram-code-assistant:github:v1:${String(userId)}`); }
+async function encryptGithubToken(token, userId, env) {
+const key = await credentialCryptoKey(env);
+const iv = crypto.getRandomValues(new Uint8Array(12));
+const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: githubCredentialAAD(userId) }, key, new TextEncoder().encode(token));
+return { iv: cfB64(iv), ciphertext: cfB64(new Uint8Array(cipher)) };
+}
+async function decryptGithubToken(ciphertext, ivValue, userId, env) {
+const key = await credentialCryptoKey(env);
+const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: cfUnb64(ivValue), additionalData: githubCredentialAAD(userId) }, key, cfUnb64(ciphertext));
+return new TextDecoder().decode(raw);
+}
+
+async function readGithubCredentialRow(userId, env) {
+await ensureSchema(env);
+return env.DB.prepare("SELECT ciphertext, iv, metadata_json FROM user_integrations WHERE user_id = ? AND provider = 'github'").bind(String(userId)).first();
+}
+
+async function writeGithubCredential(userId, encrypted, expiresAt, env, insertOnly = false) {
+await ensureSchema(env);
+const now = Math.floor(Date.now() / 1000);
+const insert = insertOnly ? 'INSERT OR IGNORE' : 'INSERT';
+const conflict = insertOnly ? '' : ` ON CONFLICT(user_id, provider) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv,
+key_version = 1, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`;
+await env.DB.prepare(`${insert} INTO user_integrations
+(user_id, provider, ciphertext, iv, key_version, metadata_json, created_at, updated_at)
+VALUES (?, 'github', ?, ?, 1, ?, ?, ?)${conflict}`)
+.bind(String(userId), encrypted.ciphertext, encrypted.iv, githubCredentialMetadata(expiresAt), now, now).run();
+}
+
+async function deleteGithubCredential(userId, env) {
+await ensureSchema(env);
+const now = Math.floor(Date.now() / 1000);
+await env.DB.prepare(`INSERT INTO user_integrations
+(user_id, provider, ciphertext, iv, key_version, metadata_json, created_at, updated_at)
+VALUES (?, 'github', '', '', 1, ?, ?, ?)
+ON CONFLICT(user_id, provider) DO UPDATE SET ciphertext = '', iv = '', key_version = 1,
+metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`)
+.bind(String(userId), githubCredentialMetadata(null, true), now, now).run();
+await env.STATS.delete(ghTokenKey(userId));
+}
 
 function looksLikeGithubToken(text) {
 const t = (text || '').trim();
@@ -2473,7 +2573,37 @@ return /^(ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|gho_[A-Za-z0-9]{30,}
 
 async function getGithubToken(userId, env) {
 if (!userId) return null;
-return await env.STATS.get(ghTokenKey(userId));
+const row = await readGithubCredentialRow(userId, env);
+if (row) {
+let metadata = {};
+try { metadata = JSON.parse(row.metadata_json || '{}'); } catch {}
+if (metadata.deleted) return null;
+if (metadata.expiresAt && metadata.expiresAt <= Math.floor(Date.now() / 1000)) {
+await deleteGithubCredential(userId, env);
+return null;
+}
+try { return await decryptGithubToken(row.ciphertext, row.iv, userId, env); }
+catch (error) {
+logSafeError('github_credential_decrypt', error);
+throw new Error('توکن GitHub قابل رمزگشایی نیست؛ کلید رمزگذاری Worker تغییر کرده یا تنظیم نشده است.');
+}
+}
+
+// سازگاری عقب‌رو: توکن‌های قدیمی KV تا زمان فراهم‌شدن کلید قابل استفاده می‌مانند.
+const legacy = await env.STATS.get(ghTokenKey(userId));
+if (!legacy || !(env.CREDENTIALS_ENCRYPTION_KEY || env.CLOUDFLARE_ENCRYPTION_KEY)) return legacy;
+const encrypted = await encryptGithubToken(legacy, userId, env);
+const expiresAt = Math.floor(Date.now() / 1000) + GH_TOKEN_TTL_SECONDS;
+// INSERT OR IGNORE و tombstone در D1 از بازنویسی credential جدید/قطع‌شده با مهاجرت هم‌زمان جلوگیری می‌کنند.
+await writeGithubCredential(userId, encrypted, expiresAt, env, true);
+const migrated = await readGithubCredentialRow(userId, env);
+if (!migrated) return legacy;
+let migratedMeta = {};
+try { migratedMeta = JSON.parse(migrated.metadata_json || '{}'); } catch {}
+if (migratedMeta.deleted) { await env.STATS.delete(ghTokenKey(userId)); return null; }
+const result = await decryptGithubToken(migrated.ciphertext, migrated.iv, userId, env);
+await env.STATS.delete(ghTokenKey(userId));
+return result;
 }
 
 // ---------- اتصال Cloudflare: token فقط از فرم HTTPS دریافت و در D1 رمز می‌شود ----------
@@ -2551,7 +2681,7 @@ await ensureSchema(env);
 const row = await env.DB.prepare("SELECT ciphertext, iv FROM user_integrations WHERE user_id = ? AND provider = 'cloudflare'").bind(String(userId)).first();
 if (!row) return null;
 try { return await decryptCloudflareToken(row.ciphertext, row.iv, userId, env); }
-catch (error) { console.error('Cloudflare credential decrypt failed:', error?.message || error); throw new Error('توکن Cloudflare قابل رمزگشایی نیست؛ کلید رمزگذاری Worker تغییر کرده یا تنظیم نشده است.'); }
+catch (error) { logSafeError('cloudflare_credential_decrypt', error); throw new Error('توکن Cloudflare قابل رمزگشایی نیست؛ کلید رمزگذاری Worker تغییر کرده یا تنظیم نشده است.'); }
 }
 
 async function storeCloudflareCredential(userId, encrypted, metadata, env) {
@@ -2663,8 +2793,8 @@ await env.DB.prepare("UPDATE cloudflare_connect_sessions SET status = 'awaiting_
 return cloudflareHtmlPage('توکن اعتبارسنجی شد', '<p>توکن معتبر است. به گفت‌وگوی خصوصی تلگرام برگرد و دکمهٔ تأیید اتصال را بزن. توکن تا پایان این درخواست به‌صورت رمزگذاری‌شده نگه‌داری می‌شود.</p>');
 } catch (error) {
 await env.DB.prepare("UPDATE cloudflare_connect_sessions SET status = 'failed' WHERE state_hash = ? AND status = 'processing'").bind(stateHash).run();
-console.error('Cloudflare connect failed:', error?.message || error);
-return cloudflareHtmlPage('اتصال انجام نشد', `<p>${escapeHtml(String(error.message || 'اعتبارسنجی ناموفق بود').substring(0, 500))}</p><p>توکن در چت تلگرام ارسال نشده است. در تلگرام اتصال را دوباره شروع کن.</p>`, 400);
+logSafeError('cloudflare_connect', error);
+return cloudflareHtmlPage('اتصال انجام نشد', `<p>${escapeHtml(userSafeErrorMessage(error, 'cloudflare'))}</p><p>توکن در چت تلگرام ارسال نشده است. در تلگرام اتصال را دوباره شروع کن.</p>`, 400);
 }
 }
 
@@ -2689,8 +2819,12 @@ await sendMessage(chatId, 'این توکن معتبر به نظر نمیاد. ا
 return;
 }
 try {
+// هرگز credential تازه را به‌صورت plaintext ذخیره نکن.
+const encrypted = await encryptGithubToken(token, userId, env);
 const info = await githubWhoAmI(token);
-await env.STATS.put(ghTokenKey(userId), token, { expirationTtl: GH_TOKEN_TTL_SECONDS });
+const expiresAt = Math.floor(Date.now() / 1000) + GH_TOKEN_TTL_SECONDS;
+await writeGithubCredential(userId, encrypted, expiresAt, env);
+await env.STATS.delete(ghTokenKey(userId));
 let msg = `گیت‌هاب وصل شد، با حساب @${info.login}.`;
 if (info.scopes) msg += `\nدسترسی‌ها: ${info.scopes}`;
 if (info.scopes !== null && info.scopes !== undefined && info.scopes !== '' && !/\brepo\b|public_repo/.test(info.scopes)) {
@@ -2700,7 +2834,8 @@ msg += deleted ? '\nپیام توکن رو هم از چت پاک کردم.' : '\
 msg += '\nحالا هر وقت خواستی بگو چی رو کجا پوش کنم.';
 await sendMessage(chatId, msg, env);
 } catch (e) {
-await sendMessage(chatId, `توکن کار نکرد: ${e.message}\n${deleted ? 'پیام توکن رو از چت پاک کردم.' : ''}`, env);
+logSafeError('github_token_connect', e);
+await sendMessage(chatId, `اتصال GitHub انجام نشد: ${userSafeErrorMessage(e, 'github')}\n${deleted ? 'پیام توکن رو از چت پاک کردم.' : ''}`, env);
 }
 }
 
@@ -2714,7 +2849,8 @@ try {
 const info = await githubWhoAmI(token);
 await sendMessage(chatId, `گیت‌هاب وصله: @${info.login}${info.scopes ? `\nدسترسی‌ها: ${info.scopes}` : ''}\nبرای قطع: /github_off`, env);
 } catch (e) {
-await sendMessage(chatId, `توکن ذخیره‌شده دیگه کار نمی‌کنه (${e.message}). یه توکن جدید بفرست: /github <توکن>`, env);
+logSafeError('github_status', e);
+await sendMessage(chatId, `وضعیت اتصال GitHub قابل بررسی نیست: ${userSafeErrorMessage(e, 'github')}\nاگر توکن منقضی شده، با /github <توکن> دوباره وصل کن.`, env);
 }
 }
 
@@ -3503,7 +3639,7 @@ const history = await getHistory(chatId, env, settings);
 // زمینه: وضعیت اتصال گیت‌هاب و فضای کار (بدون افشای توکن)
 const token = await getGithubToken(userId, env);
 let cloudflareToken = null;
-try { cloudflareToken = await getCloudflareToken(userId, env); } catch (e) { console.error('Cloudflare credential unavailable:', e?.message || e); }
+try { cloudflareToken = await getCloudflareToken(userId, env); } catch (e) { logSafeError('cloudflare_credential_read', e); }
 const activeProject = await getActiveProject(chatId, env);
 const linkedRepo = activeProject ? await getProjectRepo(chatId, activeProject.id, env) : null;
 const ws = await getWorkspace(chatId, env);
@@ -3587,7 +3723,7 @@ title: toolLabel(name, args),
 details: details || 'این ابزار تغییری در داده‌ها یا حساب متصل ایجاد می‌کند.'
 });
 } catch (approvalError) {
-console.error('could not create action approval:', approvalError?.message || approvalError);
+logSafeError('action_approval_create', approvalError);
 await sendMessage(chatId, `⛔ عملیات اجرا نشد؛ نتوانستم پیش‌نمایش تأیید را امن ذخیره کنم. دوباره تلاش کن.`, env);
 }
 return;
@@ -3601,8 +3737,10 @@ await status.finish(idx, true);
 } catch (e) {
 const key = name + ':' + (call.function?.arguments || '');
 failures[key] = (failures[key] || 0) + 1;
-result = { error: e.message, hint: failures[key] > 1 ? 'این کار دوبار با همین ورودی شکست خورده؛ تکرارش نکن، راه دیگری امتحان کن یا مشکل را به کاربر بگو.' : undefined };
-await status.finish(idx, false, e.message.substring(0, 120));
+const safeMessage = userSafeErrorMessage(e, name.startsWith('cloudflare_') ? 'cloudflare' : name.startsWith('github_') ? 'github' : 'general');
+logSafeError('agent_tool', e);
+result = { error: safeMessage, hint: failures[key] > 1 ? 'این کار دوبار با همین ورودی شکست خورده؛ تکرارش نکن، راه دیگری امتحان کن یا مشکل را به کاربر بگو.' : undefined };
+await status.finish(idx, false, safeMessage.substring(0, 120));
 }
 messages.push({ role: 'tool', tool_call_id: call.id, content: stringifyToolResult(result) });
 }

@@ -13,6 +13,7 @@ const dbCalls = [];
 const approvalRows = new Map();
 const cloudflareSessionRows = new Map();
 const cloudflareIntegrationRows = new Map();
+const githubIntegrationRows = new Map();
 const DB = {
   prepare: (sql) => {
     const statement = {
@@ -37,6 +38,17 @@ const DB = {
               else if (sql.includes("status = 'failed'")) row.status = 'failed';
             } else changes = 0;
           }
+        } else if (sql.includes('INSERT OR IGNORE INTO user_integrations')) {
+          const [user_id, ciphertext, iv, metadata_json, created_at, updated_at] = statement.values;
+          const key = `${user_id}:github`;
+          if (!githubIntegrationRows.has(key)) githubIntegrationRows.set(key, { user_id, provider: 'github', ciphertext, iv, key_version: 1, metadata_json, created_at, updated_at });
+          else changes = 0;
+        } else if (sql.includes("VALUES (?, 'github', '', '', 1")) {
+          const [user_id, metadata_json, created_at, updated_at] = statement.values;
+          githubIntegrationRows.set(`${user_id}:github`, { user_id, provider: 'github', ciphertext: '', iv: '', key_version: 1, metadata_json, created_at, updated_at });
+        } else if (sql.includes("VALUES (?, 'github', ?, ?, 1")) {
+          const [user_id, ciphertext, iv, metadata_json, created_at, updated_at] = statement.values;
+          githubIntegrationRows.set(`${user_id}:github`, { user_id, provider: 'github', ciphertext, iv, key_version: 1, metadata_json, created_at, updated_at });
         } else if (sql.includes('INSERT INTO user_integrations')) {
           const [user_id, ciphertext, iv, metadata_json, created_at, updated_at] = statement.values;
           cloudflareIntegrationRows.set(`${user_id}:cloudflare`, { user_id, ciphertext, iv, metadata_json, created_at, updated_at });
@@ -70,6 +82,7 @@ const DB = {
         dbCalls.push({ sql, values: statement.values, method: 'first' });
         if (sql.includes('FROM action_approvals')) return approvalRows.get(statement.values[0]) || null;
         if (sql.includes('FROM cloudflare_connect_sessions')) return cloudflareSessionRows.get(statement.values[0]) || null;
+        if (sql.includes("provider = 'github'")) return githubIntegrationRows.get(`${statement.values[0]}:github`) || null;
         if (sql.includes('FROM user_integrations')) return cloudflareIntegrationRows.get(`${statement.values[0]}:cloudflare`) || null;
         return null;
       }
@@ -78,13 +91,14 @@ const DB = {
   },
   batch: async (statements) => { for (const s of statements) dbCalls.push({ sql: s.sql, values: s.values, method: 'batch' }); return {}; }
 };
-const env = { TELEGRAM_BOT_TOKEN: 'TEST', CLOUDFLARE_ENCRYPTION_KEY: btoa('E'.repeat(32)), STATS, FILES, DB };
+const env = { TELEGRAM_BOT_TOKEN: 'TEST', CLOUDFLARE_ENCRYPTION_KEY: btoa('E'.repeat(32)), CREDENTIALS_ENCRYPTION_KEY: btoa('G'.repeat(32)), STATS, FILES, DB };
 
 // ثبت پیام‌های تلگرام و درخواست‌های AI
 const sent = [];
 let aiCalls = [];
 let aiResponseQueue = [];
 const githubCalls = [];
+let githubErrorOverride = null;
 const cloudflareCalls = [];
 let cloudflareDnsRecord = { id: 'd'.repeat(32), type: 'A', name: 'old.example.com', content: '192.0.2.10', ttl: 300, proxied: false };
 const ghResponse = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -98,7 +112,12 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u.includes('/chat/completions')) {
     aiCalls.push({ url: u, auth: opts.headers?.Authorization, body: JSON.parse(opts.body) });
-    return new Response(JSON.stringify(aiResponseQueue.shift() || {
+    const queued = aiResponseQueue.shift();
+    if (queued?.__status) {
+      const { __status, ...payload } = queued;
+      return new Response(JSON.stringify(payload), { status: __status, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify(queued || {
       choices: [{ message: { content: 'OK', role: 'assistant' } }]
     }), { headers: { 'Content-Type': 'application/json' } });
   }
@@ -106,7 +125,9 @@ globalThis.fetch = async (url, opts = {}) => {
     const parsed = new URL(u);
     const path = parsed.pathname;
     const method = opts.method || 'GET';
-    githubCalls.push({ url: u, method, body: opts.body ? JSON.parse(opts.body) : undefined });
+    githubCalls.push({ url: u, method, authorization: opts.headers?.Authorization, body: opts.body ? JSON.parse(opts.body) : undefined });
+    if (method === 'GET' && path === '/user' && githubErrorOverride) return ghResponse({ message: githubErrorOverride.message }, githubErrorOverride.status);
+    if (method === 'GET' && path === '/user') return ghResponse({ login: 'tester', name: 'Test User', html_url: 'https://github.com/tester' });
     if (method === 'GET' && path === '/repos/acme/app') return ghResponse({ full_name: 'acme/app', default_branch: 'main', permissions: { push: true } });
     if (method === 'POST' && path === '/user/repos') return ghResponse({ full_name: `tester/${JSON.parse(opts.body).name}`, private: JSON.parse(opts.body).private, html_url: `https://github.com/tester/${JSON.parse(opts.body).name}`, default_branch: 'main' });
     if (method === 'GET' && path === '/repos/acme/app/git/trees/main') return ghResponse({ sha: 'tree-sha-1', truncated: false, tree: [
@@ -162,6 +183,9 @@ const check = (name, cond, extra) => {
 
 // ۱) /start باید منوی شیشه‌ای جمع‌وجور زیر پیام داشته باشد
 await fire(msg('/start'));
+const malformedWebhookResponse = await route('POST', 'https://x/webhook', '{not-json');
+const malformedWebhookBody = await malformedWebhookResponse.text();
+check('HTTP error boundary پاسخ عمومی بدون جزئیات parse یا stack می‌دهد', malformedWebhookResponse.status === 500 && malformedWebhookBody.includes('request_id') && !/SyntaxError|Unexpected token|worker\.js|at .*:\d+/.test(malformedWebhookBody), malformedWebhookBody);
 const sk = lastBotMsg().body.reply_markup;
 const telegramCommands = sent.find(s => s.endpoint === 'setMyCommands')?.body.commands || [];
 const telegramCommandNames = telegramCommands.map(command => command.command);
@@ -247,6 +271,43 @@ aiCalls = [];
 await fire(msg('hi', 77));
 check('تفکیک کاربر دوم', aiCalls.some(c => c.url.includes('api.user2.com') && c.body.model === 'llama-3.3-70b'), aiCalls.map(c => c.url));
 check('کاربر اول جدا', !kv.has('ai_conn:42'));
+const privateProviderDetail = 'SENTINEL_PRIVATE_PROVIDER_DETAIL_DO_NOT_LEAK';
+aiResponseQueue.push({ __status: 502, error: { message: privateProviderDetail } });
+await fire(msg('لطفاً این سوال را پاسخ بده', 77));
+check('خطای خام AI به کاربر ارسال نمی‌شود', !lastBotMsg().body.text.includes(privateProviderDetail) && lastBotMsg().body.text.includes('سرویس هوش مصنوعی'), lastBotMsg().body.text);
+const privateGithubDetail = 'SENTINEL_GITHUB_INTERNAL_RESPONSE_DO_NOT_LEAK';
+githubErrorOverride = { status: 401, message: privateGithubDetail };
+await fire(msg(`/github ghp_${'e'.repeat(40)}`, 101));
+check('جزئیات خام خطای GitHub به Telegram ارسال نمی‌شود', !lastBotMsg().body.text.includes(privateGithubDetail) && lastBotMsg().body.text.includes('دسترسی GitHub معتبر نیست') && !githubIntegrationRows.has('101:github'));
+githubErrorOverride = null;
+
+// ۱۲.۵) توکن GitHub در D1 رمز می‌شود و توکن‌های قدیمی KV به‌صورت lazy مهاجرت می‌شوند.
+const githubToken = 'ghp_' + 'b'.repeat(40);
+await fire(msg(`/github ${githubToken}`, 88));
+const savedGithubCredential = githubIntegrationRows.get('88:github');
+check('توکن جدید GitHub فقط به‌صورت ciphertext در D1 ذخیره می‌شود', !!savedGithubCredential?.ciphertext && !savedGithubCredential.ciphertext.includes(githubToken) && !kv.has('gh_token:88') && !JSON.stringify(sent.slice(-3)).includes(githubToken));
+await fire(msg('/github', 88));
+check('توکن رمز‌شدهٔ GitHub برای API قابل بازیابی است', githubCalls.some(c => c.url.endsWith('/user') && c.authorization === `Bearer ${githubToken}`) && lastBotMsg().body.text.includes('@tester'));
+
+const legacyGithubToken = 'ghp_' + 'c'.repeat(40);
+kv.set('gh_token:99', legacyGithubToken);
+await fire(msg('/github', 99));
+const migratedGithubCredential = githubIntegrationRows.get('99:github');
+check('توکن legacy از KV به D1 رمز‌شده مهاجرت می‌کند و KV پاک می‌شود', !!migratedGithubCredential?.ciphertext && !migratedGithubCredential.ciphertext.includes(legacyGithubToken) && !kv.has('gh_token:99') && lastBotMsg().body.text.includes('@tester'));
+
+await fire(msg('/github_off', 88));
+const githubTombstone = githubIntegrationRows.get('88:github');
+check('قطع اتصال GitHub داده را با tombstone امن از دسترس خارج می‌کند', JSON.parse(githubTombstone?.metadata_json || '{}').deleted === true && !kv.has('gh_token:88'));
+
+const credentialKey = env.CREDENTIALS_ENCRYPTION_KEY;
+const cloudflareKey = env.CLOUDFLARE_ENCRYPTION_KEY;
+delete env.CREDENTIALS_ENCRYPTION_KEY;
+delete env.CLOUDFLARE_ENCRYPTION_KEY;
+const rejectedGithubToken = 'ghp_' + 'd'.repeat(40);
+await fire(msg(`/github ${rejectedGithubToken}`, 100));
+check('بدون کلید رمزگذاری توکن تازه هرگز به KV plaintext نوشته نمی‌شود', !kv.has('gh_token:100') && !githubIntegrationRows.has('100:github') && lastBotMsg().body.text.includes('CREDENTIALS_ENCRYPTION_KEY'));
+env.CREDENTIALS_ENCRYPTION_KEY = credentialKey;
+env.CLOUDFLARE_ENCRYPTION_KEY = cloudflareKey;
 
 // ۱۳) پروژه‌ها: حافظه و فضای کار جدا، بدون دست‌زدن به فضای پیش‌فرض
 await fire(msg('/project new Alpha', 77));

@@ -23,6 +23,8 @@ id = "42ea39d7093b474b99da956e06eef68a"
 required = ["TELEGRAM_BOT_TOKEN"]
 # Cloudflare per-user integration is optional; when enabled, set separately:
 # npx wrangler secret put CLOUDFLARE_ENCRYPTION_KEY
+# GitHub credentials are encrypted in D1; configure this secret before adding new tokens.
+# npx wrangler secret put CREDENTIALS_ENCRYPTION_KEY
 
 # Environment Variables (Secrets should be set via wrangler secret)
 [vars]
