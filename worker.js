@@ -1411,7 +1411,48 @@ await sendProjectMenu(chatId, env, 'دستور پروژه را نشناختم.')
 
 // =============== مدیریت پیام‌های تلگرام ===============
 
+const TELEGRAM_COMMANDS_VERSION = '2026-11-09-v1';
+const TELEGRAM_COMMANDS = [
+{ command: 'start', description: 'شروع ربات و نمایش منوی اصلی' },
+{ command: 'help', description: 'راهنما و فهرست قابلیت‌های ربات' },
+{ command: 'login', description: 'اتصال مدل هوش مصنوعی شخصی' },
+{ command: 'logout', description: 'قطع اتصال مدل هوش مصنوعی شخصی' },
+{ command: 'ai', description: 'مدیریت اتصال مدل هوش مصنوعی' },
+{ command: 'project', description: 'مدیریت پروژه‌ها، workspace و GitHub' },
+{ command: 'github', description: 'اتصال یا بررسی اتصال GitHub' },
+{ command: 'github_off', description: 'حذف توکن GitHub' },
+{ command: 'workspace', description: 'نمایش فایل‌های فضای کار فعال' },
+{ command: 'workspace_clear', description: 'پاک‌کردن فضای کار فعال' },
+{ command: 'lang', description: 'تنظیم زبان پیش‌فرض' },
+{ command: 'search', description: 'جست‌وجوی وب؛ پس از دستور عبارت را بنویس' },
+{ command: 'debug', description: 'تحلیل و دیباگ کد یا خطا' },
+{ command: 'clear', description: 'پاک‌کردن حافظهٔ گفتگو' },
+{ command: 'new', description: 'شروع گفتگوی تازه' }
+];
+
+async function ensureTelegramCommands(env) {
+if (!env.TELEGRAM_BOT_TOKEN) return;
+const versionKey = 'telegram_command_menu_version';
+try {
+if (await env.STATS.get(versionKey) === TELEGRAM_COMMANDS_VERSION) return;
+} catch {}
+
+try {
+const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ commands: TELEGRAM_COMMANDS })
+});
+const result = await response.json();
+if (!response.ok || !result.ok) throw new Error(result.description || `HTTP ${response.status}`);
+await env.STATS.put(versionKey, TELEGRAM_COMMANDS_VERSION);
+} catch (error) {
+console.error('Telegram command menu registration failed:', error?.message || error);
+}
+}
+
 async function handleUpdate(update, env) {
+await ensureTelegramCommands(env);
 // دکمه‌های شیشه‌ای (inline) — منوی هوش مصنوعی شخصی
 if (update.callback_query) {
 await handleCallbackQuery(update.callback_query, env);
@@ -1463,7 +1504,7 @@ await sendMessage(chatId, `❌ خطا: ${error.message}`, env);
 // دستورات
 async function handleCommand(chatId, userId, text, env, messageId) {
 const parts = text.trim().split(/\s+/);
-const command = parts[0].toLowerCase();
+const command = parts[0].toLowerCase().split('@')[0];
 const args = parts.slice(1);
 const settings = await getSettingsData(env);
 
@@ -1473,7 +1514,8 @@ await sendMessage(chatId, settings.welcome_message || 'به دستیار کدن�
 break;
 }
 
-case '/ai': {
+case '/ai':
+case '/login': {
 if (['off', 'remove', 'حذف'].includes((args[0] || '').toLowerCase())) {
 await removeAiConn(chatId, userId, env);
 } else {
@@ -1482,18 +1524,27 @@ await sendAiMenu(chatId, userId, env);
 break;
 }
 
+case '/logout': {
+await removeAiConn(chatId, userId, env);
+break;
+}
+
 case '/help': {
 let help = '📋 راهنما:\n\n' +
 '/start - شروع مجدد\n' +
 '/help - نمایش این راهنما\n' +
 '/ai - اتصال مدل هوش مصنوعی شخصی (Base URL + API Key + نام مدل)\n' +
+'/login - میان‌بر اتصال مدل هوش مصنوعی شخصی\n' +
+'/logout - قطع اتصال مدل هوش مصنوعی شخصی\n' +
 '/project - ساخت و جابه‌جایی بین پروژه‌ها (حافظه و فضای کار جداگانه)\n' +
 '/project repo <owner/repo> [branch] - اتصال مخزن به پروژهٔ فعال\n' +
 '/project sync - منوی GitHub پروژه\n' +
 '/project pull [overwrite] - دریافت فایل‌های مخزن (بدون overwrite پیش‌فرض)\n' +
 '/project push - پیش‌نمایش و ارسال workspace پس از تأیید\n' +
 '/lang <زبان> - تنظیم زبان پیش‌فرض\n' +
-'/clear - پاک کردن حافظه گفتگو\n\n' +
+'/search <عبارت> - جستجوی وب\n' +
+'/debug <کد/خطا> - تحلیل و دیباگ کد یا خطا\n' +
+'/clear - پاک کردن حافظه گفتگو (میان‌بر: /new)\n\n' +
 '🤖 قابلیت‌ها:\n' +
 '• ارسال کد (متنی) → دیباگ خودکار با هوش مصنوعی\n' +
 '• ارسال سوال → پاسخ از هوش مصنوعی (با حافظه گفتگو)\n' +
@@ -1525,6 +1576,26 @@ await sendMessage(chatId, '⚠️ لطفا زبان را مشخص کنید. مث
 const lang = args[0].toLowerCase();
 await env.DB.prepare('UPDATE users SET preferred_language = ? WHERE id = ?').bind(lang, userId).run();
 await sendMessage(chatId, `✅ زبان پیش‌فرض شما به «${lang}» تغییر یافت.`, env);
+}
+break;
+}
+
+case '/search': {
+const query = text.trim().slice(parts[0].length).trim();
+if (!query) {
+await sendMessage(chatId, '⚠️ عبارت جستجو را بعد از دستور بنویس. مثال: /search Cloudflare Workers', env);
+} else {
+await handleText(chatId, userId, `search: ${query}`, env);
+}
+break;
+}
+
+case '/debug': {
+const input = text.trim().slice(parts[0].length).trim();
+if (!input) {
+await sendMessage(chatId, '⚠️ کد یا متن خطا را بعد از دستور بفرست؛ یا فایل/عکس را مستقیم پیوست کن.', env);
+} else {
+await handleText(chatId, userId, input, env);
 }
 break;
 }

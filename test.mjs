@@ -86,14 +86,24 @@ const check = (name, cond, extra) => {
 // ۱) /start باید منوی شیشه‌ای جمع‌وجور زیر پیام داشته باشد
 await fire(msg('/start'));
 const sk = lastBotMsg().body.reply_markup;
+const telegramCommands = sent.find(s => s.endpoint === 'setMyCommands')?.body.commands || [];
+const telegramCommandNames = telegramCommands.map(command => command.command);
+check('فرمان‌های ربات در منوی رسمی تلگرام ثبت می‌شوند', ['start', 'help', 'ai', 'login', 'logout', 'project', 'github', 'github_off', 'workspace', 'workspace_clear', 'lang', 'search', 'debug', 'clear', 'new'].every(command => telegramCommandNames.includes(command)), telegramCommandNames);
 check('start با دکمه‌های inline', !!sk?.inline_keyboard && !sk.keyboard, sk);
 check('دکمه اتصال در کیبورد', JSON.stringify(sk).includes('🔌 اتصال مدل'));
 
 // ۲) /ai منو را نشان می‌دهد
+await fire(msg('/login'));
+check('فرمان /login منوی اتصال مدل را باز می‌کند', lastBotMsg().body.text.includes('هوش مصنوعی شخصی'), lastBotMsg().body.text);
 await fire(msg('/ai'));
 const menu = lastBotMsg();
 check('منوی /ai', menu.body.text.includes('هوش مصنوعی شخصی'), menu.body.text);
 check('منوی /ai با دکمه شیشه‌ای', !!menu.body.reply_markup?.inline_keyboard && menu.body.parse_mode === 'HTML');
+
+await fire(msg('/search'));
+check('فرمان /search بدون عبارت راهنمایی می‌دهد', lastBotMsg().body.text.includes('/search Cloudflare Workers'), lastBotMsg().body.text);
+await fire(msg('/debug'));
+check('فرمان /debug بدون کد راهنمایی می‌دهد', lastBotMsg().body.text.includes('کد یا متن خطا'), lastBotMsg().body.text);
 
 // ۳) کلیک روی دکمه اتصال → قدم ۱
 await fire(cb('ai:connect'));

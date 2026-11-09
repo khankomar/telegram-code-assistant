@@ -18,6 +18,10 @@ id = "42ea39d7093b474b99da956e06eef68a"
 binding = "FILES"
 id = "42ea39d7093b474b99da956e06eef68a"
 
+# Fail CI deploys early if the bot token is not configured as a Worker secret.
+[secrets]
+required = ["TELEGRAM_BOT_TOKEN"]
+
 # Environment Variables (Secrets should be set via wrangler secret)
 [vars]
 DEFAULT_AI_MODEL = "anthropic/claude-sonnet-4"
