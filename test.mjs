@@ -344,13 +344,27 @@ check('حافظهٔ پیش‌فرض همچنان جدا و دست‌نخورده
 // ۱۴) منوی شیشه‌ای مدیریت پروژه‌ها
 await fire(msg('/project', 77));
 const projectMenu = lastBotMsg().body.reply_markup?.inline_keyboard;
-check('منوی پروژه دکمهٔ ساخت و انتخاب دارد', !!projectMenu && JSON.stringify(projectMenu).includes('project:new') && JSON.stringify(projectMenu).includes(`project:use:${alpha.id}`), projectMenu);
+check('منوی پروژه دکمهٔ ساخت و بازکردن زیرمنو دارد', !!projectMenu && JSON.stringify(projectMenu).includes('project:new') && JSON.stringify(projectMenu).includes(`project:open:${alpha.id}`), projectMenu);
 check('راهنمای /project placeholderهای HTML را امن می‌فرستد', lastBotMsg().body.parse_mode === 'HTML' && lastBotMsg().body.text.includes('&lt;نام&gt;') && !lastBotMsg().body.text.includes('<نام>'), lastBotMsg().body.text);
 await fire(cb('project:new', 77));
 check('دکمهٔ ساخت پروژه درخواست نام می‌کند', lastBotMsg().body.text.includes('اسم پروژه') && JSON.stringify(lastBotMsg().body.reply_markup).includes('project:cancel'), lastBotMsg().body);
 await fire(msg('Beta', 77));
 const beta = JSON.parse(kv.get('projects:77') || '[]').find(p => p.name === 'Beta');
 check('ساخت پروژه با دکمه و فعال‌شدن آن', !!beta && kv.get('active_project:77') === beta.id, beta);
+await fire(cb(`project:open:${beta.id}`, 77));
+const betaDetail = lastBotMsg().body;
+const betaDetailButtons = betaDetail.reply_markup?.inline_keyboard?.flat() || [];
+check('زدن نام پروژه زیرمنوی اختصاصی با دکمه‌های مدیریت را باز می‌کند', betaDetail.text.includes('<b>Beta</b>') && betaDetailButtons.some(button => button.callback_data === `project:activate:${beta.id}`) && betaDetailButtons.some(button => button.callback_data === `project:files:${beta.id}`) && betaDetailButtons.some(button => button.callback_data === `project:github_for:${beta.id}`) && betaDetailButtons.some(button => button.callback_data === `project:rename:${beta.id}`) && betaDetailButtons.some(button => button.callback_data === `project:delete:${beta.id}`), betaDetail);
+await fire(cb(`project:activate:${alpha.id}`, 77));
+check('دکمهٔ مجزای فعال‌سازی پروژه کار می‌کند', kv.get('active_project:77') === alpha.id && lastBotMsg().body.text.includes('فعال شد'));
+await fire(cb(`project:files:${beta.id}`, 77));
+check('نمایش فایل‌ها از زیرمنو پروژهٔ فعال را عوض نمی‌کند', lastBotMsg().body.text.includes('فایل‌های Beta') && kv.get('active_project:77') === alpha.id);
+await fire(cb(`project:github_for:${beta.id}`, 77));
+check('رفتن به GitHub از زیرمنوی پروژهٔ غیرفعال نیازمند فعال‌سازی صریح است', kv.get('active_project:77') === alpha.id && lastBotMsg().body.text.includes('ابتدا همین پروژه را'));
+await fire(cb(`project:rename:${beta.id}`, 77));
+check('دکمهٔ تغییر نام ورودی جدید را درخواست می‌کند', lastBotMsg().body.text.includes('نام جدید پروژه'));
+await fire(msg('Beta Prime', 77));
+check('تغییر نام پروژه از زیرمنو انجام می‌شود', JSON.parse(kv.get('projects:77') || '[]').some(p => p.id === beta.id && p.name === 'Beta Prime') && lastBotMsg().body.text.includes('تغییر کرد'));
 await fire(cb(`project:use:${alpha.id}`, 77));
 check('انتخاب پروژه با دکمه', kv.get('active_project:77') === alpha.id);
 await fire(cb('project:off', 77));
@@ -437,12 +451,12 @@ check('پاک‌کردن workspace ابتدا تأیید می‌خواهد', cle
 await fire(cb(clearCancel, 77));
 check('لغو پاک‌کردن workspace فایل‌ها را نگه می‌دارد', JSON.parse(kv.get(`ws:77:project:${alpha.id}`) || '{}').files.length === beforeClear && lastBotMsg().body.text.includes('هیچ تغییری اعمال نشد'));
 
-await fire(msg('/project delete Beta', 77));
+await fire(cb(`project:delete:${beta.id}`, 77));
 const deletePrompt = lastBotMsg();
 const deleteConfirm = deletePrompt.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
-check('حذف پروژه ابتدا دربارهٔ داده‌های حذف‌شونده هشدار می‌دهد', deletePrompt.body.text.includes('تاریخچهٔ گفتگو') && JSON.parse(kv.get('projects:77') || '[]').some(p => p.name === 'Beta'));
+check('دکمهٔ حذف پروژه ابتدا دربارهٔ داده‌های حذف‌شونده هشدار می‌دهد', deletePrompt.body.text.includes('تاریخچهٔ گفتگو') && JSON.parse(kv.get('projects:77') || '[]').some(p => p.name === 'Beta Prime'));
 await fire(cb(deleteConfirm, 77));
-check('پروژه فقط پس از تأیید حذف می‌شود', !JSON.parse(kv.get('projects:77') || '[]').some(p => p.name === 'Beta'));
+check('پروژه فقط پس از تأیید حذف می‌شود', !JSON.parse(kv.get('projects:77') || '[]').some(p => p.name === 'Beta Prime'));
 
 // ۱۷) اتصال امن Cloudflare: HTTPS، state یک‌بارمصرف، AES-GCM و تأیید تلگرام
 await fire(msg('/cloudflare', 42));

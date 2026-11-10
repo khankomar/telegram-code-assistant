@@ -1136,6 +1136,59 @@ logSafeError('callback', e);
 async function handleProjectCallbackQuery(chatId, userId, data, env) {
 if (data === 'project:menu') { await sendProjectMenu(chatId, env); return; }
 if (data === 'project:github') { await sendProjectGithubMenu(chatId, userId, env); return; }
+if (data.startsWith('project:open:')) { await sendProjectDetailMenu(chatId, env, data.slice('project:open:'.length)); return; }
+if (data.startsWith('project:activate:')) {
+const id = data.slice('project:activate:'.length);
+const project = (await getProjects(chatId, env)).find(item => item.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+await env.STATS.put(activeProjectKey(chatId), id);
+await sendProjectDetailMenu(chatId, env, id, `✅ پروژهٔ «${project.name}» فعال شد.`);
+return;
+}
+if (data.startsWith('project:files:')) {
+const id = data.slice('project:files:'.length);
+const project = (await getProjects(chatId, env)).find(item => item.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+let workspace = { files: [] };
+try { workspace = JSON.parse(await env.STATS.get(wsKey(chatId, id)) || '{"files":[]}'); } catch (e) {}
+const files = Array.isArray(workspace.files) ? workspace.files : [];
+const list = files.length ? files.slice(0, 40).map(file => `• ${escapeHtml(file.path)}`).join('\n') : 'هنوز فایلی در workspace این پروژه نیست.';
+await sendMessage(chatId, `📁 <b>فایل‌های ${escapeHtml(project.name)}</b> · ${files.length} فایل\n\n${list}${files.length > 40 ? `\n… و ${files.length - 40} فایل دیگر` : ''}`, env, { inline_keyboard: [[{ text: '↩️ بازگشت به پروژه', callback_data: `project:open:${id}` }]] }, 'HTML');
+return;
+}
+if (data.startsWith('project:github_for:')) {
+const id = data.slice('project:github_for:'.length);
+const project = (await getProjects(chatId, env)).find(item => item.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+const active = await getActiveProject(chatId, env);
+if (active?.id !== id) {
+await sendProjectDetailMenu(chatId, env, id, 'برای مدیریت GitHub، ابتدا همین پروژه را با دکمهٔ «فعال‌کردن این پروژه» فعال کن.');
+return;
+}
+await sendProjectGithubMenu(chatId, userId, env);
+return;
+}
+if (data.startsWith('project:rename:')) {
+const id = data.slice('project:rename:'.length);
+const project = (await getProjects(chatId, env)).find(item => item.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+await env.STATS.put(projectFlowKey(chatId), JSON.stringify({ step: 'rename', projectId: id }), { expirationTtl: 600 });
+await sendMessage(chatId, `نام جدید پروژهٔ «${escapeHtml(project.name)}» را بفرست.`, env, { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]] }, 'HTML');
+return;
+}
+if (data.startsWith('project:delete:')) {
+const id = data.slice('project:delete:'.length);
+const project = (await getProjects(chatId, env)).find(item => item.id === id);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+const active = await getActiveProject(chatId, env);
+await requestActionConfirmation(chatId, userId, env, {
+kind: 'project_delete',
+payload: { projectId: id, label: `حذف پروژهٔ ${project.name}` },
+title: `حذف پروژهٔ «${project.name}»`,
+details: `فضای کار، تاریخچهٔ گفتگو و اتصال مخزن این پروژه حذف می‌شود. این کار قابل بازگشت نیست.${active?.id === id ? '\nاین پروژه فعال است و پس از حذف به حالت پیش‌فرض برمی‌گردی.' : ''}`
+});
+return;
+}
 if (data === 'project:link') { await startProjectRepoFlow(chatId, env); return; }
 if (data === 'project:unlink') {
 const project = await getActiveProject(chatId, env);
@@ -1488,12 +1541,21 @@ const rows = [];
 for (let i = 0; i < projects.length; i += 2) {
 rows.push(projects.slice(i, i + 2).map(project => ({
 text: `${project.id === active?.id ? '✅ ' : '📁 '}${project.name}`,
-callback_data: `project:use:${project.id}`
+callback_data: `project:open:${project.id}`
 })));
 }
 rows.push([{ text: '➕ پروژهٔ جدید', callback_data: 'project:new' }]);
 if (active) rows.push([{ text: '🏠 فضای پیش‌فرض', callback_data: 'project:off' }]);
-if (active) rows.push([{ text: '🐙 مخزن و همگام‌سازی GitHub', callback_data: 'project:github' }]);
+if (active) rows.push([{ text: '🐙 مخزن و همگام‌سازی پروژهٔ فعال', callback_data: 'project:github' }]);
+return { inline_keyboard: rows };
+}
+
+function projectDetailKeyboard(project, active) {
+const rows = [];
+rows.push([{ text: project.id === active?.id ? '✅ همین حالا فعال است' : '⚡ فعال‌کردن این پروژه', callback_data: `project:activate:${project.id}` }]);
+rows.push([{ text: '📁 فایل‌های پروژه', callback_data: `project:files:${project.id}` }, { text: '🐙 GitHub و همگام‌سازی', callback_data: `project:github_for:${project.id}` }]);
+rows.push([{ text: '✏️ تغییر نام', callback_data: `project:rename:${project.id}` }, { text: '🗑 حذف پروژه', callback_data: `project:delete:${project.id}` }]);
+rows.push([{ text: '↩️ بازگشت به فهرست پروژه‌ها', callback_data: 'project:menu' }]);
 return { inline_keyboard: rows };
 }
 
@@ -1506,6 +1568,21 @@ const guidance = projects.length
 ? 'برای جابه‌جایی، روی نام پروژه بزن؛ پروژه‌ها حافظه و workspace جدا دارند.'
 : 'هنوز پروژه‌ای نساخته‌ای. برای شروع روی «پروژهٔ جدید» بزن.';
 await sendMessage(chatId, `${intro}📂 <b>مدیریت پروژه‌ها</b>\n${status}\n\n${guidance}`, env, projectMenuKeyboard(projects, active), 'HTML');
+}
+
+async function sendProjectDetailMenu(chatId, env, projectId, notice = '') {
+const project = (await getProjects(chatId, env)).find(item => item.id === projectId);
+if (!project) { await sendProjectMenu(chatId, env, 'این پروژه دیگر در دسترس نیست.'); return; }
+const active = await getActiveProject(chatId, env);
+const linked = await getProjectRepo(chatId, project.id, env);
+const raw = await env.STATS.get(wsKey(chatId, project.id));
+let workspace = { files: [] };
+try { if (raw) workspace = JSON.parse(raw); } catch (e) {}
+const fileCount = Array.isArray(workspace.files) ? workspace.files.length : 0;
+const status = project.id === active?.id ? '✅ فعال' : 'غیرفعال';
+const repoStatus = linked ? `\nمخزن: <code>${escapeHtml(linked.repo)}</code> · شاخه: <code>${escapeHtml(linked.branch)}</code>` : '\nمخزن GitHub وصل نیست.';
+const text = `${notice ? `${escapeHtml(notice)}\n\n` : ''}📂 <b>${escapeHtml(project.name)}</b>\nوضعیت: ${status}\nفایل‌های workspace: ${fileCount}${repoStatus}\n\nیک کار را از دکمه‌های زیر انتخاب کن.`;
+await sendMessage(chatId, text, env, projectDetailKeyboard(project, active), 'HTML');
 }
 
 function projectRepoKey(chatId, projectId) { return `project_repo:${chatId}:${projectId}`; }
@@ -1757,6 +1834,19 @@ await env.STATS.put(activeProjectKey(chatId), project.id);
 return { ok: true, project, message: `✅ پروژهٔ «${cleanName}» ساخته و فعال شد.` };
 }
 
+async function renameProject(chatId, projectId, name, env) {
+const cleanName = String(name || '').trim().replace(/\s+/g, ' ');
+if (!cleanName || cleanName.length > 40 || !/^[\p{L}\p{N} _.-]+$/u.test(cleanName)) return { ok: false, message: 'نام پروژه باید ۱ تا ۴۰ نویسه باشد و از حروف، عدد، فاصله، نقطه، خط تیره یا زیرخط تشکیل شود.' };
+const projects = await getProjects(chatId, env);
+const project = projects.find(item => item.id === projectId);
+if (!project) return { ok: false, message: 'این پروژه دیگر وجود ندارد.' };
+if (projects.some(item => item.id !== projectId && normalizeProjectName(item.name) === normalizeProjectName(cleanName))) return { ok: false, message: 'پروژه‌ای با این نام از قبل وجود دارد.' };
+const oldName = project.name;
+project.name = cleanName;
+await env.STATS.put(projectsKey(chatId), JSON.stringify(projects));
+return { ok: true, project, message: `✅ نام پروژه از «${oldName}» به «${cleanName}» تغییر کرد.` };
+}
+
 async function deleteProjectById(chatId, projectId, env) {
 const projects = await getProjects(chatId, env);
 const project = projects.find(p => p.id === projectId);
@@ -1791,6 +1881,18 @@ return true;
 }
 await env.STATS.delete(projectFlowKey(chatId));
 await sendProjectGithubMenu(chatId, userId, env, result.message);
+return true;
+}
+let renameFlow = null;
+try { if (flow.startsWith('{')) renameFlow = JSON.parse(flow); } catch (e) {}
+if (renameFlow?.step === 'rename') {
+const result = await renameProject(chatId, renameFlow.projectId, text, env);
+if (!result.ok) {
+await sendMessage(chatId, `⚠️ ${result.message}\n\nنام دیگری بفرست یا لغو کن.`, env, { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'project:cancel' }]] });
+return true;
+}
+await env.STATS.delete(projectFlowKey(chatId));
+await sendProjectDetailMenu(chatId, env, renameFlow.projectId, result.message);
 return true;
 }
 if (flow !== 'name') return false;
