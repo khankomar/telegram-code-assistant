@@ -691,7 +691,20 @@ inline_keyboard: [[{ text: BTN.cancel, callback_data: 'ai:cancel' }]]
 function aiMenuKeyboard(connected) { return mainKeyboard(connected); }
 
 function helpPanelKeyboard(section = 'home') {
-if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
+	if (section === 'commands') return { inline_keyboard: [
+		[{ text: '▶️ شروع', callback_data: 'cmd:start' }, { text: '🧭 راهنما', callback_data: 'cmd:help' }],
+		[{ text: '🧠 دستیار هوش مصنوعی', callback_data: 'cmd:ai' }, { text: '🚪 قطع مدل', callback_data: 'cmd:logout' }],
+		[{ text: '📂 پروژه‌ها', callback_data: 'cmd:project' }],
+		[{ text: '🔗 اتصال مخزن', callback_data: 'cmd:project_repo' }, { text: '🔄 همگام‌سازی', callback_data: 'cmd:project_sync' }],
+		[{ text: '⬇️ دریافت از GitHub', callback_data: 'cmd:project_pull' }, { text: '⬆️ ارسال به GitHub', callback_data: 'cmd:project_push' }],
+		[{ text: '🐙 وضعیت GitHub', callback_data: 'cmd:github' }, { text: '🔌 قطع GitHub', callback_data: 'cmd:github_off' }],
+		[{ text: '☁️ Cloudflare', callback_data: 'cmd:cloudflare' }],
+		[{ text: '📁 فایل‌های فضای کار', callback_data: 'cmd:workspace' }, { text: '🗑 خالی‌کردن فضای کار', callback_data: 'cmd:workspace_clear' }],
+		[{ text: '🔎 جست‌وجو', callback_data: 'cmd:search' }, { text: '🐛 دیباگ', callback_data: 'cmd:debug' }],
+		[{ text: '⌨️ تنظیم زبان', callback_data: 'cmd:lang' }, { text: '🧹 پاک‌کردن گفتگو', callback_data: 'cmd:clear' }],
+		[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
+	] };
+	if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
 return { inline_keyboard: [
 [{ text: '🧠 دستیار', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
 [{ text: '🐙 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '📎 فایل‌ها', callback_data: 'help:files' }],
@@ -733,18 +746,11 @@ if (section === 'files') return [
 '<code>/workspace</code>  دیدن فایل‌های فضای کار',
 '<code>/workspace_clear</code>  خالی‌کردن فضای کار (با تأیید)'
 ].join('\n');
-if (section === 'commands') return [
-'⌨️ <b>فهرست دستورها</b>',
-'<code>/start</code>  نمایش منوی اصلی',
-'<code>/help</code>  راهنمای تعاملی',
-'<code>/ai</code>، <code>/login</code>، <code>/logout</code>  مدیریت مدل',
-'<code>/project</code>  مدیریت پروژه‌ها',
-'<code>/project repo</code>، <code>/project sync</code>، <code>/project pull</code>، <code>/project push</code>  اتصال و همگام‌سازی مخزن',
-'<code>/github</code>، <code>/github_off</code>، <code>/cloudflare</code>  اتصال حساب‌ها',
-'<code>/workspace</code>، <code>/workspace_clear</code>  مدیریت فایل‌ها',
-'<code>/search [عبارت]</code>، <code>/debug</code>، <code>/lang [زبان]</code>  جست‌وجو، تحلیل و تنظیم زبان',
-'<code>/clear</code> یا <code>/new</code>  پاک‌کردن حافظهٔ گفتگو'
-].join('\n');
+	if (section === 'commands') return [
+	'⌨️ <b>همهٔ فرمان‌ها</b>',
+	'برای اجرای هر فرمان، دکمهٔ مربوط را لمس کن. بعضی کارها مثل جست‌وجو، تنظیم زبان و اتصال مخزن بعد از انتخاب دکمه از تو ورودی می‌خواهند.',
+	'برای جست‌وجو یا دیباگ، متن یا کد را پس از زدن دکمه در پیام بعدی بفرست. اتصال Cloudflare فقط در گفت‌وگوی خصوصی انجام می‌شود.'
+	].join('\n\n');
 let text = '🧭 <b>راهنمای ربات</b>\nیک بخش را انتخاب کن تا دستورها و روش استفاده را ببینی؛ یا خواسته‌ات را به زبان طبیعی بنویس.';
 if (!aiConnected) text += '\n\n⚠️ برای استفاده از قابلیت‌های هوش مصنوعی، مدل را با <code>/ai</code> وصل کن.';
 return text;
@@ -1076,17 +1082,27 @@ const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(St
 return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function handleCallbackQuery(cb, env) {
+async function handleCallbackQuery(cb, env, publicOrigin = '') {
 try { await answerCallbackQuery(cb.id, env); } catch (e) {}
 const chatId = cb.message?.chat?.id;
 const userId = cb.from?.id;
 const data = cb.data || '';
 if (!chatId || !userId) return;
 try {
-if (data.startsWith('action:')) {
-await handleActionConfirmationCallback(cb, env);
-return;
-}
+	if (data.startsWith('action:')) {
+		await handleActionConfirmationCallback(cb, env);
+		return;
+	}
+	if (data.startsWith('cmd:')) {
+		const command = {
+			start: '/start', help: '/help', ai: '/ai', logout: '/logout', project: '/project',
+			project_repo: '/project repo', project_sync: '/project sync', project_pull: '/project pull', project_push: '/project push',
+			github: '/github', github_off: '/github_off', cloudflare: '/cloudflare', workspace: '/workspace',
+			workspace_clear: '/workspace_clear', search: '/search', debug: '/debug', lang: '/lang', clear: '/clear'
+		}[data.slice(4)];
+		if (command) await handleCommand(chatId, userId, command, env, null, publicOrigin);
+		return;
+	}
 if (data.startsWith('help:')) {
 const section = data.slice('help:'.length);
 if (['home', 'ai', 'projects', 'accounts', 'files', 'commands'].includes(section)) {
@@ -1905,7 +1921,7 @@ async function handleUpdate(update, env, publicOrigin = '') {
 await ensureTelegramCommands(env);
 // دکمه‌های شیشه‌ای (inline) — منوی هوش مصنوعی شخصی
 if (update.callback_query) {
-await handleCallbackQuery(update.callback_query, env);
+		await handleCallbackQuery(update.callback_query, env, publicOrigin);
 return;
 }
 

@@ -201,7 +201,8 @@ const projectHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessag
 check('دکمهٔ پروژه‌ها راهنمای فرمان‌های پروژه را در همان پیام باز می‌کند', projectHelpEdit?.text.includes('<code>/project push</code>') && projectHelpEdit.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'help:home', projectHelpEdit);
 await fire(cb('help:commands'));
 const commandsHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
-check('دکمهٔ همهٔ دستورها فهرست فرمان‌های اصلی را نشان می‌دهد', commandsHelpEdit?.text.includes('<code>/debug</code>') && commandsHelpEdit.text.includes('<code>/cloudflare</code>') && commandsHelpEdit.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'help:home', commandsHelpEdit);
+const commandButtons = commandsHelpEdit?.reply_markup?.inline_keyboard?.flat() || [];
+check('همهٔ دستورها به‌صورت دکمه‌های شیشه‌ای نمایش داده می‌شوند', commandsHelpEdit?.text.includes('دکمهٔ مربوط را لمس کن') && commandButtons.some(button => button.callback_data === 'cmd:debug') && commandButtons.some(button => button.callback_data === 'cmd:cloudflare') && commandButtons.some(button => button.callback_data === 'cmd:workspace_clear') && commandButtons.some(button => button.callback_data === 'help:home'), commandsHelpEdit);
 await fire(cb('help:home'));
 check('بازگشت، منوی راهنمای اصلی و دکمه‌های دسته‌ها را برمی‌گرداند', [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body?.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'help:files'));
 
