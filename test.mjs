@@ -195,7 +195,15 @@ check('دکمه اتصال در کیبورد', JSON.stringify(sk).includes('🔌
 await fire(msg('/help'));
 const helpMessage = lastBotMsg().body;
 const helpButtons = helpMessage.reply_markup?.inline_keyboard || [];
-check('راهنمای اصلی کوتاه است و کیبورد شیشه‌ای دسته‌بندی دارد', helpMessage.parse_mode === 'HTML' && helpMessage.text.includes('<b>راهنمای ربات</b>') && helpButtons.flat().some(button => button.callback_data === 'help:projects') && helpButtons.flat().some(button => button.callback_data === 'help:commands'), helpMessage);
+check('راهنمای اصلی کوتاه است و کیبورد شیشه‌ای دسته‌بندی دارد', helpMessage.parse_mode === 'HTML' && helpMessage.text.includes('<b>راهنمای ربات</b>') && helpButtons.flat().some(button => button.callback_data === 'help:projects') && helpButtons.flat().some(button => button.callback_data === 'help:commands') && helpButtons.flat().some(button => button.callback_data === 'user:settings') && helpButtons.flat().some(button => button.callback_data === 'user:profile'), helpMessage);
+await fire(cb('user:settings'));
+const userSettingsMenu = lastBotMsg().body;
+check('منوی تنظیمات کاربر دکمه‌های انتخاب زبان و اتصال دارد', userSettingsMenu.text.includes('تنظیمات کاربر') && userSettingsMenu.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'user:lang:python') && userSettingsMenu.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'ai:status'));
+await fire(cb('user:lang:python'));
+check('انتخاب زبان از منوی شیشه‌ای تنظیمات ذخیره می‌شود', dbCalls.some(call => call.sql.includes('UPDATE users SET preferred_language') && call.values[0] === 'python'));
+await fire(cb('user:profile'));
+const profileMenu = lastBotMsg().body;
+check('پروفایل کاربر شناسه و وضعیت اتصال‌ها را با دکمه‌های ادامه نمایش می‌دهد', profileMenu.text.includes('پروفایل کاربر') && profileMenu.text.includes('شناسهٔ تلگرام') && profileMenu.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'user:settings'));
 await fire(cb('help:projects'));
 const projectHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
 check('دکمهٔ پروژه‌ها راهنمای فرمان‌های پروژه را در همان پیام باز می‌کند', projectHelpEdit?.text.includes('<code>/project push</code>') && projectHelpEdit.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data === 'help:home', projectHelpEdit);

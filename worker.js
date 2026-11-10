@@ -705,11 +705,50 @@ function helpPanelKeyboard(section = 'home') {
 		[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
 	] };
 	if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
+	return { inline_keyboard: [
+	[{ text: '🧠 دستیار', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
+	[{ text: '🐙 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '📎 فایل‌ها', callback_data: 'help:files' }],
+	[{ text: '⚙️ تنظیمات کاربر', callback_data: 'user:settings' }, { text: '👤 پروفایل من', callback_data: 'user:profile' }],
+	[{ text: '⌨️ همهٔ دستورها', callback_data: 'help:commands' }]
+	] };
+}
+
+function userSettingsKeyboard() {
 return { inline_keyboard: [
-[{ text: '🧠 دستیار', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
-[{ text: '🐙 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '📎 فایل‌ها', callback_data: 'help:files' }],
-[{ text: '⌨️ همهٔ دستورها', callback_data: 'help:commands' }]
+[{ text: '🐍 Python', callback_data: 'user:lang:python' }, { text: '🟨 JavaScript', callback_data: 'user:lang:javascript' }],
+[{ text: '🔷 TypeScript', callback_data: 'user:lang:typescript' }, { text: '☕ Java', callback_data: 'user:lang:java' }],
+[{ text: '🦀 Rust', callback_data: 'user:lang:rust' }, { text: '🐹 Go', callback_data: 'user:lang:go' }],
+[{ text: '🧠 مدل هوش مصنوعی', callback_data: 'ai:status' }, { text: '🐙 حساب GitHub', callback_data: 'help:accounts' }],
+[{ text: '☁️ تنظیمات Cloudflare', callback_data: 'cmd:cloudflare' }, { text: '📂 مدیریت پروژه‌ها', callback_data: 'cmd:project' }],
+[{ text: '↩️ بازگشت به منو', callback_data: 'help:home' }]
 ] };
+}
+
+async function sendUserSettingsPanel(chatId, userId, env, notice = '') {
+let language = 'تنظیم نشده';
+try {
+const row = await env.DB.prepare('SELECT preferred_language FROM users WHERE id = ?').bind(userId).first();
+if (row?.preferred_language) language = row.preferred_language;
+} catch (e) {}
+const text = `${notice ? `${escapeHtml(notice)}\n\n` : ''}⚙️ <b>تنظیمات کاربر</b>\nزبان پیش‌فرض کدنویسی: <b>${escapeHtml(language)}</b>\n\nزبان را انتخاب کن یا یکی از بخش‌های حساب و پروژه را باز کن.`;
+await sendMessage(chatId, text, env, userSettingsKeyboard(), 'HTML');
+}
+
+async function sendUserProfilePanel(chatId, user, env) {
+const userId = user?.id;
+const active = await getActiveProject(chatId, env);
+const aiConnected = !!(await getUserAIConn(userId, env));
+let githubConnected = false;
+let cloudflareConnected = false;
+try { githubConnected = !!(await getGithubToken(userId, env)); } catch (e) {}
+try { cloudflareConnected = !!(await getCloudflareCredentialMeta(userId, env)); } catch (e) {}
+const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || 'کاربر تلگرام';
+const username = user?.username ? `@${escapeHtml(user.username)}` : 'ثبت نشده';
+const text = `👤 <b>پروفایل کاربر</b>\nنام: ${escapeHtml(fullName)}\nنام کاربری: ${username}\nشناسهٔ تلگرام: <code>${escapeHtml(userId)}</code>\n\nمدل شخصی: ${aiConnected ? '✅ متصل' : '⚪️ متصل نیست'}\nGitHub: ${githubConnected ? '✅ متصل' : '⚪️ متصل نیست'}\nCloudflare: ${cloudflareConnected ? '✅ متصل' : '⚪️ متصل نیست'}\nپروژهٔ فعال: ${active ? `📂 ${escapeHtml(active.name)}` : '🏠 فضای پیش‌فرض'}`;
+await sendMessage(chatId, text, env, { inline_keyboard: [
+[{ text: '⚙️ تنظیمات کاربر', callback_data: 'user:settings' }, { text: '🧠 مدیریت مدل', callback_data: 'ai:status' }],
+[{ text: '📂 مدیریت پروژه‌ها', callback_data: 'cmd:project' }, { text: '↩️ بازگشت به منو', callback_data: 'help:home' }]
+] }, 'HTML');
 }
 
 function helpPanelText(section, aiConnected) {
@@ -1103,7 +1142,16 @@ try {
 		if (command) await handleCommand(chatId, userId, command, env, null, publicOrigin);
 		return;
 	}
-if (data.startsWith('help:')) {
+	if (data === 'user:settings') { await sendUserSettingsPanel(chatId, userId, env); return; }
+	if (data === 'user:profile') { await sendUserProfilePanel(chatId, cb.from, env); return; }
+	if (data.startsWith('user:lang:')) {
+		const language = data.slice('user:lang:'.length);
+		if (!['python', 'javascript', 'typescript', 'java', 'rust', 'go'].includes(language)) return;
+		await env.DB.prepare('UPDATE users SET preferred_language = ? WHERE id = ?').bind(language, userId).run();
+		await sendUserSettingsPanel(chatId, userId, env, `✅ زبان پیش‌فرض به ${language} تغییر کرد.`);
+		return;
+	}
+	if (data.startsWith('help:')) {
 const section = data.slice('help:'.length);
 if (['home', 'ai', 'projects', 'accounts', 'files', 'commands'].includes(section)) {
 await sendHelpPanel(chatId, userId, env, section, cb.message?.message_id);
