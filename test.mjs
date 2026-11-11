@@ -14,6 +14,8 @@ const approvalRows = new Map();
 const cloudflareSessionRows = new Map();
 const cloudflareIntegrationRows = new Map();
 const githubIntegrationRows = new Map();
+const adminPanelUsers = [];
+const adminPanelIntegrationRows = [];
 const DB = {
   prepare: (sql) => {
     const statement = {
@@ -77,9 +79,15 @@ const DB = {
         }
         return { meta: { changes } };
       },
-      all: async () => { dbCalls.push({ sql, values: statement.values, method: 'all' }); return { results: [] }; },
+      all: async () => {
+        dbCalls.push({ sql, values: statement.values, method: 'all' });
+        if (sql.includes('SELECT * FROM users ORDER BY created_at DESC LIMIT 100')) return { results: adminPanelUsers };
+        if (sql.includes('FROM user_integrations') && sql.includes('provider IN')) return { results: adminPanelIntegrationRows };
+        return { results: [] };
+      },
       first: async () => {
         dbCalls.push({ sql, values: statement.values, method: 'first' });
+        if (sql.includes('SELECT * FROM users WHERE id = ?')) return adminPanelUsers.find(user => String(user.id) === String(statement.values[0])) || null;
         if (sql.includes('FROM action_approvals')) return approvalRows.get(statement.values[0]) || null;
         if (sql.includes('FROM cloudflare_connect_sessions')) return cloudflareSessionRows.get(statement.values[0]) || null;
         if (sql.includes("provider = 'github'")) return githubIntegrationRows.get(`${statement.values[0]}:github`) || null;
@@ -195,6 +203,23 @@ const protectedWithFreshKeyAndStaleCookie = await worker.fetch(new Request(`http
 check('پنل بدون کلید صحیح دسترسی را رد می‌کند', protectedWithoutKey.status === 401);
 check('cookie رمزگذاری‌شدهٔ ADMIN_SECRET به‌درستی پذیرفته می‌شود', protectedWithCookie.status === 200);
 check('کلید صحیح تازه بر cookie قدیمی مقدم است', protectedWithFreshKeyAndStaleCookie.status === 200);
+const nowSeconds = Math.floor(Date.now() / 1000);
+adminPanelUsers.push(
+  { id: '77', username: 'connected-user', preferred_language: 'python', created_at: '2026-01-01' },
+  { id: '78', username: 'disconnected-user', preferred_language: 'javascript', created_at: '2026-01-02' }
+);
+adminPanelIntegrationRows.push(
+  { user_id: '77', provider: 'github', ciphertext: 'github-encrypted-test-only', iv: 'iv-github', metadata_json: JSON.stringify({ expiresAt: nowSeconds + 3600 }) },
+  { user_id: '77', provider: 'cloudflare', ciphertext: 'cloudflare-encrypted-test-only', iv: 'iv-cloudflare', metadata_json: '{}' },
+  { user_id: '78', provider: 'github', ciphertext: 'expired-github-test-only', iv: 'iv-expired', metadata_json: JSON.stringify({ expiresAt: nowSeconds - 5 }) }
+);
+const adminPanelResponse = await route('GET', `https://x/admin?key=${encodeURIComponent(env.ADMIN_SECRET)}`);
+const adminPanelHtml = await adminPanelResponse.text();
+check('جدول کاربران پنل ستون‌ها و نشانگرهای اتصال GitHub و Cloudflare را دارد', adminPanelResponse.status === 200 && adminPanelHtml.includes('<th>GitHub</th>') && adminPanelHtml.includes('<th>Cloudflare</th>') && adminPanelHtml.includes('@connected-user') && adminPanelHtml.includes('✅ متصل') && adminPanelHtml.includes('⚪ قطع'), adminPanelHtml.slice(0, 500));
+check('markup پنل هیچ ciphertext یا token اتصال را نمایش نمی‌دهد', !adminPanelHtml.includes('github-encrypted-test-only') && !adminPanelHtml.includes('cloudflare-encrypted-test-only'));
+const adminUserDetailsResponse = await route('GET', `https://x/api/user?id=77&key=${encodeURIComponent(env.ADMIN_SECRET)}`);
+const adminUserDetails = await adminUserDetailsResponse.json();
+check('جزئیات کاربر فقط flagهای متصل‌بودن را برمی‌گرداند', adminUserDetails.user.github_connected === true && adminUserDetails.user.cloudflare_connected === true && !JSON.stringify(adminUserDetails).includes('github-encrypted-test-only') && !JSON.stringify(adminUserDetails).includes('cloudflare-encrypted-test-only'), adminUserDetails);
 if (previousAdminSecret === undefined) delete env.ADMIN_SECRET; else env.ADMIN_SECRET = previousAdminSecret;
 const sk = lastBotMsg().body.reply_markup;
 const telegramCommands = sent.find(s => s.endpoint === 'setMyCommands')?.body.commands || [];

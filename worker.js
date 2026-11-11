@@ -271,6 +271,7 @@ async function renderAdminPanel(env) {
 const stats = await getStatsData(env);
 const users = await getUsersData(env);
 const settings = await getSettingsData(env);
+const connectionStatuses = await getAdminUserConnectionStatuses(users, env);
 
 const html = `
 <!DOCTYPE html>
@@ -358,7 +359,7 @@ table { font-size: 12px; }
 <table id="usersTable">
 <thead>
 <tr>
-<th>ID</th><th>نام کاربری</th><th>زبان</th><th>تاریخ عضویت</th><th>عملیات</th>
+<th>ID</th><th>نام کاربری</th><th>زبان</th><th>GitHub</th><th>Cloudflare</th><th>تاریخ عضویت</th><th>عملیات</th>
 </tr>
 </thead>
 <tbody>
@@ -367,6 +368,8 @@ ${users.map(user => `
 <td>${user.id}</td>
 <td>@${escapeHtml(user.username || 'کاربر')}</td>
 <td>${escapeHtml(user.preferred_language || '-')}</td>
+<td>${connectionStatuses[String(user.id)]?.github ? '<span class="badge badge-success">✅ متصل</span>' : '<span class="badge badge-warning">⚪ قطع</span>'}</td>
+<td>${connectionStatuses[String(user.id)]?.cloudflare ? '<span class="badge badge-success">✅ متصل</span>' : '<span class="badge badge-warning">⚪ قطع</span>'}</td>
 <td>${escapeHtml(user.created_at || '')}</td>
 <td>
 <button class="btn btn-info" onclick="viewUser('${user.id}')">👁️</button>
@@ -502,6 +505,8 @@ document.getElementById('modalContent').innerHTML =
 '<p><b>ID:</b> ' + data.user.id + '</p>' +
 '<p><b>نام کاربری:</b> @' + (data.user.username || 'کاربر') + '</p>' +
 '<p><b>زبان:</b> ' + (data.user.preferred_language || '-') + '</p>' +
+'<p><b>GitHub:</b> ' + (data.user.github_connected ? '✅ متصل' : '⚪ قطع') + '</p>' +
+'<p><b>Cloudflare:</b> ' + (data.user.cloudflare_connected ? '✅ متصل' : '⚪ قطع') + '</p>' +
 '<p><b>تاریخ عضویت:</b> ' + (data.user.created_at || '-') + '</p>';
 document.getElementById('userModal').style.display = 'block';
 }
@@ -4256,10 +4261,50 @@ const { results } = await env.DB.prepare(
 return results;
 }
 
+// فقط وضعیت اتصال برمی‌گردد؛ ciphertext، IV و token هرگز وارد پاسخ پنل نمی‌شوند.
+async function getAdminUserConnectionStatuses(users, env) {
+const statuses = {};
+for (const user of users || []) statuses[String(user.id)] = { github: false, cloudflare: false };
+if (!users?.length) return statuses;
+
+let rows = [];
+try {
+await ensureSchema(env);
+const result = await env.DB.prepare("SELECT user_id, provider, ciphertext, iv, metadata_json FROM user_integrations WHERE provider IN ('github', 'cloudflare')").all();
+rows = result.results || [];
+} catch (error) {
+logSafeError('admin_integration_status', error);
+}
+
+const githubRows = new Set();
+const now = Math.floor(Date.now() / 1000);
+for (const row of rows) {
+	const userId = String(row.user_id);
+	if (!Object.prototype.hasOwnProperty.call(statuses, userId)) continue;
+	if (row.provider === 'github') {
+		githubRows.add(userId);
+		let metadata = {};
+		try { metadata = JSON.parse(row.metadata_json || '{}'); } catch {}
+		const expired = metadata.expiresAt && Number(metadata.expiresAt) <= now;
+		statuses[userId].github = !!row.ciphertext && !!row.iv && !metadata.deleted && !expired;
+	} else if (row.provider === 'cloudflare') {
+		statuses[userId].cloudflare = !!row.ciphertext && !!row.iv;
+	}
+}
+
+// پشتیبانی از توکن‌های GitHub قدیمی که هنوز در KV مهاجرت نشده‌اند.
+await Promise.all((users || []).filter(user => !githubRows.has(String(user.id))).map(async user => {
+	try { statuses[String(user.id)].github = !!(await env.STATS.get(ghTokenKey(user.id))); } catch {}
+}));
+return statuses;
+}
+
 async function getUserDetail(userId, env) {
 const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first();
+const statuses = await getAdminUserConnectionStatuses(user ? [user] : [], env);
+const details = user || { id: userId, username: 'کاربر' };
 return jsonResponse({
-user: user || { id: userId, username: 'کاربر' }
+user: { ...details, github_connected: !!statuses[String(userId)]?.github, cloudflare_connected: !!statuses[String(userId)]?.cloudflare }
 });
 }
 
