@@ -186,10 +186,13 @@ return await setupWebhook(url, env);
 // ============ احراز هویت اختیاری پنل ============
 const isAdminPath = url.pathname.startsWith('/admin') || url.pathname.startsWith('/api');
 if (isAdminPath && env.ADMIN_SECRET) {
-const cookieToken = (request.headers.get('Cookie') || '').match(/admin_token=([^;]+)/)?.[1] || '';
+const encodedCookieToken = (request.headers.get('Cookie') || '').match(/(?:^|;\s*)admin_token=([^;]+)/)?.[1] || '';
+let cookieToken = '';
+try { cookieToken = decodeURIComponent(encodedCookieToken); } catch (e) { cookieToken = encodedCookieToken; }
 const urlToken = url.searchParams.get('key') || '';
 const headerToken = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-const token = cookieToken || urlToken || headerToken;
+// کلید صریح در URL یا Authorization باید بتواند cookie قدیمی/خراب را جایگزین کند.
+const token = urlToken || headerToken || cookieToken;
 if (token !== env.ADMIN_SECRET) {
 return new Response('🔒 دسترسی غیرمجاز. با ?key=YOUR_SECRET وارد شوید.', { status: 401 });
 }
