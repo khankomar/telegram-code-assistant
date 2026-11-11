@@ -81,7 +81,7 @@ const DB = {
       },
       all: async () => {
         dbCalls.push({ sql, values: statement.values, method: 'all' });
-        if (sql.includes('SELECT * FROM users ORDER BY created_at DESC LIMIT 100')) return { results: adminPanelUsers };
+        if (sql.includes('FROM users ORDER BY created_at DESC LIMIT 100')) return { results: adminPanelUsers };
         if (sql.includes('FROM user_integrations') && sql.includes('provider IN')) return { results: adminPanelIntegrationRows };
         return { results: [] };
       },
@@ -217,6 +217,8 @@ const adminPanelResponse = await route('GET', `https://x/admin?key=${encodeURICo
 const adminPanelHtml = await adminPanelResponse.text();
 check('جدول کاربران پنل ستون‌ها و نشانگرهای اتصال GitHub و Cloudflare را دارد', adminPanelResponse.status === 200 && adminPanelHtml.includes('<th>GitHub</th>') && adminPanelHtml.includes('<th>Cloudflare</th>') && adminPanelHtml.includes('@connected-user') && adminPanelHtml.includes('✅ متصل') && adminPanelHtml.includes('⚪ قطع'), adminPanelHtml.slice(0, 500));
 check('markup پنل هیچ ciphertext یا token اتصال را نمایش نمی‌دهد', !adminPanelHtml.includes('github-encrypted-test-only') && !adminPanelHtml.includes('cloudflare-encrypted-test-only'));
+const scopedIntegrationQuery = dbCalls.findLast(call => call.method === 'all' && call.sql.includes('FROM user_integrations') && call.sql.includes('provider IN'));
+check('query وضعیت اتصال فقط کاربران همین صفحه را با bind parameter می‌خواند', scopedIntegrationQuery?.sql.includes('user_id IN (?, ?)') && JSON.stringify(scopedIntegrationQuery.values) === JSON.stringify(['77', '78']));
 const adminUserDetailsResponse = await route('GET', `https://x/api/user?id=77&key=${encodeURIComponent(env.ADMIN_SECRET)}`);
 const adminUserDetails = await adminUserDetailsResponse.json();
 check('جزئیات کاربر فقط flagهای متصل‌بودن را برمی‌گرداند', adminUserDetails.user.github_connected === true && adminUserDetails.user.cloudflare_connected === true && !JSON.stringify(adminUserDetails).includes('github-encrypted-test-only') && !JSON.stringify(adminUserDetails).includes('cloudflare-encrypted-test-only'), adminUserDetails);

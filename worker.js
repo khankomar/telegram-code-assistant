@@ -4256,7 +4256,7 @@ return jsonResponse({ users: await getUsersData(env) });
 
 async function getUsersData(env) {
 const { results } = await env.DB.prepare(
-'SELECT * FROM users ORDER BY created_at DESC LIMIT 100'
+'SELECT id, username, preferred_language, created_at FROM users ORDER BY created_at DESC LIMIT 100'
 ).all();
 return results;
 }
@@ -4270,7 +4270,10 @@ if (!users?.length) return statuses;
 let rows = [];
 try {
 await ensureSchema(env);
-const result = await env.DB.prepare("SELECT user_id, provider, ciphertext, iv, metadata_json FROM user_integrations WHERE provider IN ('github', 'cloudflare')").all();
+// صفحهٔ کاربران حداکثر ۱۰۰ ردیف دارد؛ فقط همان شناسه‌ها را بخوان تا تعداد کاربران کل دیتابیس هزینه را زیاد نکند.
+const userIds = (users || []).map(user => String(user.id));
+const placeholders = userIds.map(() => '?').join(', ');
+const result = await env.DB.prepare(`SELECT user_id, provider, ciphertext, iv, metadata_json FROM user_integrations WHERE user_id IN (${placeholders}) AND provider IN ('github', 'cloudflare')`).bind(...userIds).all();
 rows = result.results || [];
 } catch (error) {
 logSafeError('admin_integration_status', error);
