@@ -219,11 +219,11 @@ const projectHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessag
 check('بخش پروژه‌ها فرمان‌های مدیریت و sync را به دکمه تبدیل می‌کند', projectHelpEdit?.text.includes('<code>/project push</code>') && projectHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:project') && projectHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:project_push') && projectHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'help:home'), projectHelpEdit);
 await fire(cb('help:ai'));
 const aiHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
-check('بخش دستیار دکمه‌های AI و logout و debug دارد', aiHelpEdit?.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:ai') && aiHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:logout') && aiHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:debug'));
+check('بخش دستیار فرمان‌ها را به دکمه تبدیل می‌کند و متن تکراری ندارد', aiHelpEdit?.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:ai') && aiHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:logout') && aiHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:debug') && aiHelpEdit.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'cmd:search') && !/<code>\/(ai|login|logout|debug|search)/.test(aiHelpEdit.text));
 await fire(cb('help:accounts'));
 const accountsHelpEdit = [...sent].reverse().find(s => s.endpoint === 'editMessageText')?.body;
 const accountsButtons = accountsHelpEdit?.reply_markup?.inline_keyboard?.flat() || [];
-check('بخش حساب‌ها دکمه‌های GitHub و Cloudflare و قطع اتصال دارد', accountsButtons.some(button => button.callback_data === 'cmd:github') && accountsButtons.some(button => button.callback_data === 'cmd:github_off') && accountsButtons.some(button => button.callback_data === 'cmd:cloudflare') && accountsButtons.some(button => button.callback_data === 'cmd:cloudflare_off'));
+check('بخش حساب‌ها فرمان‌ها را به دکمه تبدیل می‌کند و متن تکراری ندارد', accountsButtons.some(button => button.callback_data === 'cmd:github') && accountsButtons.some(button => button.callback_data === 'cmd:github_off') && accountsButtons.some(button => button.callback_data === 'cmd:cloudflare') && accountsButtons.some(button => button.callback_data === 'cmd:cloudflare_off') && !/<code>\/(github|github_off|cloudflare)/.test(accountsHelpEdit.text));
 await fire(cb('cmd:cloudflare_off'));
 check('دکمهٔ قطع Cloudflare فرمان /cloudflare off را اجرا می‌کند', lastBotMsg().body.text.includes('اتصال Cloudflare حذف شد'));
 await fire(cb('help:commands'));
@@ -242,7 +242,12 @@ check('منوی /ai', menu.body.text.includes('هوش مصنوعی شخصی'), m
 check('منوی /ai با دکمه شیشه‌ای', !!menu.body.reply_markup?.inline_keyboard && menu.body.parse_mode === 'HTML');
 
 await fire(msg('/search'));
-check('فرمان /search بدون عبارت راهنمایی می‌دهد', lastBotMsg().body.text.includes('/search Cloudflare Workers'), lastBotMsg().body.text);
+check('فرمان /search بدون عبارت ورودی جست‌وجو و دکمهٔ لغو باز می‌کند', lastBotMsg().body.text.includes('عبارت موردنظرت') && lastBotMsg().body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'search:cancel'));
+await fire(msg('Cloudflare Workers observability'));
+check('پیام بعد از دکمهٔ جست‌وجو واقعاً به وب‌سرچ ارسال می‌شود', lastBotMsg().body.text.includes('نتیجه جستجو برای «Cloudflare Workers observability»'));
+await fire(msg('/search'));
+await fire(cb('search:cancel'));
+check('لغو جست‌وجو flow موقت را می‌بندد', lastBotMsg().body.text.includes('جست‌وجو لغو شد'));
 await fire(msg('/debug'));
 check('فرمان /debug بدون کد راهنمایی می‌دهد', lastBotMsg().body.text.includes('کد یا متن خطا'), lastBotMsg().body.text);
 

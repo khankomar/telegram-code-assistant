@@ -640,6 +640,20 @@ headers: { 'Content-Type': 'text/html; charset=utf-8' }
 
 function aiConnKey(userId) { return `ai_conn:${userId}`; }
 function aiFlowKey(userId) { return `ai_flow:${userId}`; }
+function searchFlowKey(userId) { return `search_flow:${userId}`; }
+
+async function handleSearchFlowInput(chatId, userId, text, env) {
+	const pending = await env.STATS.get(searchFlowKey(userId));
+	if (!pending) return false;
+	await env.STATS.delete(searchFlowKey(userId));
+	const query = (text || '').trim();
+	if (!query) {
+		await sendMessage(chatId, 'عبارت جست‌وجو خالی بود؛ جست‌وجو لغو شد.', env);
+		return true;
+	}
+	await handleText(chatId, userId, `search: ${query}`, env);
+	return true;
+}
 
 async function getUserAIConn(userId, env) {
 if (!userId) return null;
@@ -704,18 +718,21 @@ function helpPanelKeyboard(section = 'home') {
 			[{ text: '☁️ وضعیت/اتصال Cloudflare', callback_data: 'cmd:cloudflare' }, { text: '🛑 قطع Cloudflare', callback_data: 'cmd:cloudflare_off' }],
 		[{ text: '📁 فایل‌های فضای کار', callback_data: 'cmd:workspace' }, { text: '🗑 خالی‌کردن فضای کار', callback_data: 'cmd:workspace_clear' }],
 		[{ text: '🔎 جست‌وجو', callback_data: 'cmd:search' }, { text: '🐛 دیباگ', callback_data: 'cmd:debug' }],
-		[{ text: '⌨️ تنظیم زبان', callback_data: 'cmd:lang' }, { text: '🧹 پاک‌کردن گفتگو', callback_data: 'cmd:clear' }],
+			[{ text: '⌨️ انتخاب زبان', callback_data: 'user:settings' }, { text: '🧹 پاک‌کردن گفتگو', callback_data: 'cmd:clear' }],
 		[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
 		] };
 		if (section === 'ai') return { inline_keyboard: [
-			[{ text: '🧠 اتصال / وضعیت مدل', callback_data: 'cmd:ai' }, { text: '🚪 قطع مدل شخصی', callback_data: 'cmd:logout' }],
-			[{ text: '🐛 دیباگ کد', callback_data: 'cmd:debug' }, { text: '🔎 جست‌وجوی وب', callback_data: 'cmd:search' }],
-			[{ text: '⚙️ تنظیم زبان پیش‌فرض', callback_data: 'user:settings' }],
+			[{ text: '🧠 مدیریت / اتصال مدل (/ai)', callback_data: 'cmd:ai' }],
+			[{ text: '🚪 قطع اتصال مدل (/logout)', callback_data: 'cmd:logout' }],
+			[{ text: '🐛 دیباگ کد (/debug)', callback_data: 'cmd:debug' }, { text: '🔎 جست‌وجوی وب (/search)', callback_data: 'cmd:search' }],
+			[{ text: '⌨️ انتخاب زبان', callback_data: 'user:settings' }],
 			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
 		] };
 		if (section === 'accounts') return { inline_keyboard: [
-			[{ text: '🐙 وضعیت / اتصال GitHub', callback_data: 'cmd:github' }, { text: '🔌 قطع GitHub', callback_data: 'cmd:github_off' }],
-			[{ text: '☁️ وضعیت / اتصال Cloudflare', callback_data: 'cmd:cloudflare' }, { text: '🛑 قطع Cloudflare', callback_data: 'cmd:cloudflare_off' }],
+			[{ text: '🐙 وضعیت / اتصال GitHub (/github)', callback_data: 'cmd:github' }],
+			[{ text: '🔌 قطع GitHub (/github_off)', callback_data: 'cmd:github_off' }],
+			[{ text: '☁️ اتصال / مدیریت Cloudflare (/cloudflare)', callback_data: 'cmd:cloudflare' }],
+			[{ text: '🛑 قطع Cloudflare (/cloudflare off)', callback_data: 'cmd:cloudflare_off' }],
 			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
 		] };
 		if (section === 'projects') return { inline_keyboard: [
@@ -779,11 +796,8 @@ await sendMessage(chatId, text, env, { inline_keyboard: [
 function helpPanelText(section, aiConnected) {
 if (section === 'ai') return [
 '🧠 <b>دستیار و کدنویسی</b>',
-'<code>/ai</code> یا <code>/login</code>  اتصال و مدیریت مدل هوش مصنوعی',
-'<code>/logout</code>  قطع اتصال مدل',
-'<code>/debug</code>  تحلیل و دیباگ کد یا خطا',
-'<code>/search [عبارت]</code>  جست‌وجوی وب',
-aiConnected ? 'مدل هوش مصنوعی متصل است و برای چت، دیباگ و تحلیل فایل استفاده می‌شود.' : 'برای فعال‌شدن پاسخ‌گویی هوشمند، مدل را از مسیر <code>/ai</code> وصل کن.'
+ 'برای مدیریت مدل، قطع اتصال، دیباگ کد، جست‌وجوی وب و انتخاب زبان، دکمهٔ مربوط را بزن.',
+ aiConnected ? '✅ مدل هوش مصنوعی متصل است و برای چت، دیباگ و تحلیل فایل آماده است.' : '⚠️ برای پاسخ‌گویی هوشمند، از دکمهٔ «مدیریت / اتصال مدل» استفاده کن.'
 ].join('\n');
 if (section === 'projects') return [
 '📂 <b>پروژه‌ها و GitHub</b>',
@@ -796,12 +810,9 @@ if (section === 'projects') return [
 ].join('\n');
 if (section === 'accounts') return [
 '🐙 <b>اتصال حساب‌ها</b>',
-'<code>/github</code>  دیدن وضعیت یا اتصال با <code>/github &lt;token&gt;</code>',
-'پیام حاوی توکن GitHub خودکار حذف می‌شود؛ اگر حذف نشد، خودت آن را پاک کن.',
-'<code>/github_off</code>  قطع GitHub',
-'<code>/cloudflare</code>  اتصال امن یا مدیریت Cloudflare',
-'توکن Cloudflare را فقط در فرم HTTPS خصوصی وارد کن، نه در چت.',
-'<code>/cloudflare off</code>  قطع اتصال Cloudflare'
+'برای دیدن وضعیت، اتصال یا قطع هر حساب، دکمهٔ همان سرویس را انتخاب کن.',
+'🔒 توکن Cloudflare را در چت نفرست؛ اتصال فقط از طریق فرم امن HTTPS انجام می‌شود.',
+'پیام حاوی توکن GitHub خودکار حذف می‌شود؛ اگر حذف نشد، خودت آن را پاک کن.'
 ].join('\n');
 if (section === 'files') return [
 '📎 <b>کد و فایل‌ها</b>',
@@ -1155,6 +1166,11 @@ if (!chatId || !userId) return;
 try {
 	if (data.startsWith('action:')) {
 		await handleActionConfirmationCallback(cb, env);
+		return;
+	}
+	if (data === 'search:cancel') {
+		await env.STATS.delete(searchFlowKey(userId));
+		await sendMessage(chatId, '❌ جست‌وجو لغو شد.', env, helpPanelKeyboard('ai'));
 		return;
 	}
 	if (data.startsWith('cmd:')) {
@@ -2124,9 +2140,11 @@ await handleDocument(chatId, document, caption, env, userId);
 await incrementStat('total_files', env);
 } else if (text.startsWith('/')) {
 await handleCommand(chatId, userId, text, env, messageId, publicOrigin);
-} else if (await handleProjectFlowInput(chatId, userId, text, env)) {
-// نام پروژه در جریان ساخت با دکمه دریافت شد
-} else if (looksLikeGithubToken(text)) {
+	} else if (await handleProjectFlowInput(chatId, userId, text, env)) {
+	// نام پروژه در جریان ساخت با دکمه دریافت شد
+	} else if (await handleSearchFlowInput(chatId, userId, text, env)) {
+	// عبارت جست‌وجو از ورودی بعد از لمس دکمه دریافت شد
+	} else if (looksLikeGithubToken(text)) {
 // کاربر توکن را بدون دستور فرستاده
 await saveGithubTokenFromChat(chatId, userId, text.trim(), env, messageId);
 } else if (await handleKeyboardButton(chatId, userId, text, env)) {
@@ -2147,6 +2165,7 @@ async function handleCommand(chatId, userId, text, env, messageId, publicOrigin 
 const parts = text.trim().split(/\s+/);
 const command = parts[0].toLowerCase().split('@')[0];
 const args = parts.slice(1);
+if (command !== '/search') await env.STATS.delete(searchFlowKey(userId));
 const settings = await getSettingsData(env);
 
 switch (command) {
@@ -2189,8 +2208,12 @@ break;
 case '/search': {
 const query = text.trim().slice(parts[0].length).trim();
 if (!query) {
-await sendMessage(chatId, '⚠️ عبارت جستجو را بعد از دستور بنویس. مثال: /search Cloudflare Workers', env);
+await env.STATS.put(searchFlowKey(userId), 'pending', { expirationTtl: 600 });
+await sendMessage(chatId, '🔎 عبارت موردنظرت برای جست‌وجوی وب را در پیام بعدی بفرست.', env, {
+	inline_keyboard: [[{ text: '❌ لغو جست‌وجو', callback_data: 'search:cancel' }]]
+});
 } else {
+await env.STATS.delete(searchFlowKey(userId));
 await handleText(chatId, userId, `search: ${query}`, env);
 }
 break;
