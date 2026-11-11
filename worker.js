@@ -701,13 +701,35 @@ function helpPanelKeyboard(section = 'home') {
 		[{ text: '🔗 اتصال مخزن', callback_data: 'cmd:project_repo' }, { text: '🔄 همگام‌سازی', callback_data: 'cmd:project_sync' }],
 		[{ text: '⬇️ دریافت از GitHub', callback_data: 'cmd:project_pull' }, { text: '⬆️ ارسال به GitHub', callback_data: 'cmd:project_push' }],
 		[{ text: '🐙 وضعیت GitHub', callback_data: 'cmd:github' }, { text: '🔌 قطع GitHub', callback_data: 'cmd:github_off' }],
-		[{ text: '☁️ Cloudflare', callback_data: 'cmd:cloudflare' }],
+			[{ text: '☁️ وضعیت/اتصال Cloudflare', callback_data: 'cmd:cloudflare' }, { text: '🛑 قطع Cloudflare', callback_data: 'cmd:cloudflare_off' }],
 		[{ text: '📁 فایل‌های فضای کار', callback_data: 'cmd:workspace' }, { text: '🗑 خالی‌کردن فضای کار', callback_data: 'cmd:workspace_clear' }],
 		[{ text: '🔎 جست‌وجو', callback_data: 'cmd:search' }, { text: '🐛 دیباگ', callback_data: 'cmd:debug' }],
 		[{ text: '⌨️ تنظیم زبان', callback_data: 'cmd:lang' }, { text: '🧹 پاک‌کردن گفتگو', callback_data: 'cmd:clear' }],
 		[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
-	] };
-	if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
+		] };
+		if (section === 'ai') return { inline_keyboard: [
+			[{ text: '🧠 اتصال / وضعیت مدل', callback_data: 'cmd:ai' }, { text: '🚪 قطع مدل شخصی', callback_data: 'cmd:logout' }],
+			[{ text: '🐛 دیباگ کد', callback_data: 'cmd:debug' }, { text: '🔎 جست‌وجوی وب', callback_data: 'cmd:search' }],
+			[{ text: '⚙️ تنظیم زبان پیش‌فرض', callback_data: 'user:settings' }],
+			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
+		] };
+		if (section === 'accounts') return { inline_keyboard: [
+			[{ text: '🐙 وضعیت / اتصال GitHub', callback_data: 'cmd:github' }, { text: '🔌 قطع GitHub', callback_data: 'cmd:github_off' }],
+			[{ text: '☁️ وضعیت / اتصال Cloudflare', callback_data: 'cmd:cloudflare' }, { text: '🛑 قطع Cloudflare', callback_data: 'cmd:cloudflare_off' }],
+			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
+		] };
+		if (section === 'projects') return { inline_keyboard: [
+			[{ text: '📂 مدیریت پروژه‌ها', callback_data: 'cmd:project' }, { text: '🐙 مخزن و همگام‌سازی', callback_data: 'cmd:project_sync' }],
+			[{ text: '⬇️ دریافت از GitHub', callback_data: 'cmd:project_pull' }, { text: '⬆️ ارسال به GitHub', callback_data: 'cmd:project_push' }],
+			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
+		] };
+		if (section === 'files') return { inline_keyboard: [
+			[{ text: '📁 مشاهدهٔ فایل‌های workspace', callback_data: 'cmd:workspace' }],
+			[{ text: '🗑 پاک‌کردن workspace با تأیید', callback_data: 'cmd:workspace_clear' }],
+			[{ text: '🐛 تحلیل / دیباگ کد', callback_data: 'cmd:debug' }],
+			[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]
+		] };
+		if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت به راهنمای اصلی', callback_data: 'help:home' }]] };
 	return { inline_keyboard: [
 	[{ text: '🧠 دستیار', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
 	[{ text: '🐙 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '📎 فایل‌ها', callback_data: 'help:files' }],
@@ -1139,7 +1161,7 @@ try {
 		const command = {
 			start: '/start', help: '/help', ai: '/ai', logout: '/logout', project: '/project',
 			project_repo: '/project repo', project_sync: '/project sync', project_pull: '/project pull', project_push: '/project push',
-			github: '/github', github_off: '/github_off', cloudflare: '/cloudflare', workspace: '/workspace',
+				github: '/github', github_off: '/github_off', cloudflare: '/cloudflare', cloudflare_off: '/cloudflare off', workspace: '/workspace',
 			workspace_clear: '/workspace_clear', search: '/search', debug: '/debug', lang: '/lang', clear: '/clear'
 		}[data.slice(4)];
 		if (command) await handleCommand(chatId, userId, command, env, null, publicOrigin);
