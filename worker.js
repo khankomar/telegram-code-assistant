@@ -839,7 +839,7 @@ if (section === 'ai') return { inline_keyboard: [
 [{ text: '🤖 مدیریت / اتصال مدل (/ai)', callback_data: 'cmd:ai' }],
 [{ text: '🔌 اتصال سریع مدل شخصی', callback_data: 'ai:connect' }, { text: '🚪 قطع مدل (/logout)', callback_data: 'cmd:logout' }],
 [{ text: '🐛 راهنمای دیباگ (/debug)', callback_data: 'cmd:debug' }, { text: '🧹 پاک‌کردن گفتگو (/clear)', callback_data: 'cmd:clear' }],
-[{ text: '⌨️ تنظیم زبان کدنویسی', callback_data: 'user:settings' }],
+[{ text: '🔎 جست‌وجوی وب (/search)', callback_data: 'cmd:search' }, { text: '⌨️ تنظیم زبان کدنویسی', callback_data: 'user:settings' }],
 [{ text: '↩️ بازگشت به منوی اصلی', callback_data: 'help:home' }]
 ] };
 
@@ -881,8 +881,8 @@ if (section !== 'home') return { inline_keyboard: [[{ text: '↩️ بازگشت
 return { inline_keyboard: [
 [{ text: '🧠 دستیار و AI', callback_data: 'help:ai' }, { text: '📂 پروژه‌ها', callback_data: 'help:projects' }],
 [{ text: '📁 فضای کار و فایل‌ها', callback_data: 'help:files' }, { text: '🌐 وب و لینک', callback_data: 'help:web' }],
-[{ text: '🔗 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '⚙️ تنظیمات و پروفایل', callback_data: 'help:user' }],
-[{ text: '⌨️ همهٔ دستورها', callback_data: 'help:commands' }]
+[{ text: '🔗 اتصال حساب‌ها', callback_data: 'help:accounts' }, { text: '⌨️ همهٔ دستورها', callback_data: 'help:commands' }],
+[{ text: '⚙️ تنظیمات', callback_data: 'user:settings' }, { text: '👤 پروفایل', callback_data: 'user:profile' }]
 ] };
 }
 
@@ -928,7 +928,7 @@ function helpPanelText(section, aiConnected) {
 if (section === 'ai') return [
 '🧠 <b>دستیار و هوش مصنوعی</b>',
 'از دکمه‌های زیر برای اتصال مدل شخصی، تنظیم زبان کدنویسی یا پاک‌کردن حافظه استفاده کن.',
-aiConnected ? '✅ مدل هوش مصنوعی متصل است و حالت ایجنت آمادهٔ پاسخ‌گویی است.' : '⚠️ برای پاسخ‌گویی هوشمند، مدل را با <code>/ai</code> متصل کن.'
+aiConnected ? '✅ مدل هوش مصنوعی متصل است و حالت ایجنت آمادهٔ پاسخ‌گویی است.' : '⚠️ برای پاسخ‌گویی هوشمند، مدل را با دکمهٔ «اتصال مدل» در همین منو وصل کن.'
 ].join('\n');
 
 if (section === 'projects') return [
@@ -970,10 +970,10 @@ if (section === 'user') return [
 
 if (section === 'commands') return [
 '⌨️ <b>همهٔ دستورها</b>',
-'روی هر دکمه بزن تا همان فرمان اجرا یا ورودی‌اش از تو گرفته شود. منوی <code>/</code> پایین تلگرام هم با همهٔ دستورهای جدید آپدیت شده است.'
+'دکمهٔ مربوط را لمس کن تا همان فرمان اجرا یا ورودی‌اش از تو گرفته شود. منوی <code>/</code> پایین تلگرام هم با همهٔ دستورها آپدیت شده است.'
 ].join('\n');
 
-let text = '🧭 <b>منوی اصلی ربات</b>\nیک بخش را انتخاب کن یا مستقیم کد، فایل، عکس خطا یا درخواستت را بفرست.';
+let text = '🧭 <b>راهنمای ربات</b>\nیک بخش را انتخاب کن یا مستقیم کد، فایل، عکس خطا یا درخواستت را بفرست.';
 if (!aiConnected) text += '\n\n⚠️ برای استفاده از قابلیت‌های هوش مصنوعی، مدل را با <code>/ai</code> وصل کن.';
 return text;
 }
@@ -2397,13 +2397,13 @@ const settings = await getSettingsData(env);
 switch (command) {
 case '/start': {
 const isPrivate = String(chatId) === String(userId);
-await sendMessage(
-chatId,
-settings.welcome_message || 'به دستیار کدنویسی خوش آمدید! 🤖',
-env,
-isPrivate ? persistentReplyKeyboard() : aiMenuKeyboard(!!(await getUserAIConn(userId, env)))
-);
-if (isPrivate) await sendHelpPanel(chatId, userId, env, 'home');
+const startConnected = !!(await getUserAIConn(userId, env));
+if (isPrivate) {
+await sendMessage(chatId, settings.welcome_message || 'به دستیار کدنویسی خوش آمدید! 🤖', env, persistentReplyKeyboard());
+await sendMessage(chatId, '👇 یکی از گزینه‌های زیر را انتخاب کن (منوی کامل: «📋 منوی اصلی»):', env, aiMenuKeyboard(startConnected));
+} else {
+await sendMessage(chatId, settings.welcome_message || 'به دستیار کدنویسی خوش آمدید! 🤖', env, aiMenuKeyboard(startConnected));
+}
 break;
 }
 
@@ -2470,7 +2470,7 @@ break;
 case '/debug': {
 const input = text.trim().slice(parts[0].length).trim();
 if (!input) {
-await sendMessage(chatId, '🐛 کد، لاگ خطا، عکس یا فایل کد را مستقیم در پیام بعدی بفرست تا بررسی‌اش کنم.', env);
+await sendMessage(chatId, '🐛 کد یا متن خطا را مستقیم در پیام بعدی بفرست تا بررسی‌اش کنم (عکس خطا یا فایل کد هم قبول است).', env);
 } else {
 await handleText(chatId, userId, input, env);
 }

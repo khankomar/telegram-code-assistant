@@ -498,8 +498,10 @@ await fire(msg('یک مخزن خصوصی confirmed-repo بساز', 77));
 const repoPrompt = lastBotMsg();
 const repoConfirm = repoPrompt.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
 check('ساخت مخزن GitHub پیش از تأیید هیچ POSTای نمی‌فرستد', repoPrompt.body.text.includes('confirmed-repo') && !githubCalls.some(c => c.method === 'POST' && c.url.endsWith('/user/repos')));
+const sentBeforeRepoConfirm = sent.length;
 await fire(cb(repoConfirm, 77));
-check('ساخت مخزن پس از تأیید اجرا می‌شود', githubCalls.some(c => c.method === 'POST' && c.url.endsWith('/user/repos')) && lastBotMsg().body.text.includes('confirmed-repo'));
+// ایجنت بعد از تأیید خودکار ادامه می‌دهد؛ پس پیام نتیجهٔ اجرا باید در بین پیام‌های بعد از تأیید باشد، نه لزوماً آخرین پیام.
+check('ساخت مخزن پس از تأیید اجرا می‌شود', githubCalls.some(c => c.method === 'POST' && c.url.endsWith('/user/repos')) && sent.slice(sentBeforeRepoConfirm).some(s => s.endpoint === 'sendMessage' && s.body.text.includes('confirmed-repo')));
 
 // لغوِ preview و مسیرهای مخرب مستقیم هم باید بدون تغییر تمام شوند.
 const beforeClear = JSON.parse(kv.get(`ws:77:project:${alpha.id}`) || '{}').files.length;
@@ -561,8 +563,9 @@ await fire(msg('برای api.example.com رکورد A بساز', 42));
 const cfCreatePrompt = lastBotMsg();
 const cfCreateConfirm = cfCreatePrompt.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
 check('ساخت DNS پیش از تأیید فقط preview دقیق نشان می‌دهد', cfCreatePrompt.body.text.includes('api.example.com') && cfCreatePrompt.body.text.includes('192.0.2.22') && cfCreateConfirm?.startsWith('action:yes:') && !cloudflareCalls.some(c => c.method === 'POST'));
+const sentBeforeDnsConfirm = sent.length;
 await fire(cb(cfCreateConfirm, 42));
-check('ساخت DNS پس از تأیید اجرا می‌شود', cloudflareCalls.some(c => c.method === 'POST' && c.path.endsWith('/dns_records')) && lastBotMsg().body.text.includes('اجرا شد'));
+check('ساخت DNS پس از تأیید اجرا می‌شود', cloudflareCalls.some(c => c.method === 'POST' && c.path.endsWith('/dns_records')) && sent.slice(sentBeforeDnsConfirm).some(s => s.endpoint === 'sendMessage' && s.body.text.includes('اجرا شد')));
 
 aiResponseQueue.push({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'cf-delete-1', type: 'function', function: { name: 'cloudflare_delete_dns_record', arguments: JSON.stringify({ zone_id: 'a'.repeat(32), record_id: 'd'.repeat(32) }) } }] } }] });
 await fire(msg('این رکورد را حذف کن', 42));
